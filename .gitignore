@@ -1,0 +1,16 @@
+# Python bytecode
+__pycache__/
+.py[cod]
+
+# Environments
+venv
+
+# Coverage reports
+.coverage
+*.xml
+
+# mypy
+.mypy_cache/
+
+# Editors.
+*~

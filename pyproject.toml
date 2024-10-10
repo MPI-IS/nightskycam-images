@@ -1,0 +1,78 @@
+[tool.poetry]
+name = "nightskycam-images"
+version = "0.1.0"
+description = ""
+authors = ["Vincent Berenz <vincent.berenz@tuebingen.mpg.de>"]
+readme = "README.md"
+packages = [{include = "nightskycam_images"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+# Normal dependencies:
+# Installable with both poetry and pip.
+#opencv-contrib-python = "^4.10.0.84"
+pillow = "^10.4.0"
+toml = "^0.10.2"
+tomli = "^2.0.1"
+tomli-w = "^1.0.0"
+opencv-python = "^4.10.0.84"
+
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+# Dependencies for development:
+# Only installable with poetry (NOT pip).
+black = "^24.8.0"
+codespell = "^2.3.0"
+flake8 = "^7.1.1"
+flake8-bugbear = "^24.4.26"
+isort = "^5.13.2"
+mypy = "^1.11.1"
+pre-commit = "^3.8.0"
+types-toml = "^0.10.8.20240310"
+
+[tool.poetry.group.test]
+optional = true
+
+[tool.poetry.group.test.dependencies]
+# Dependencies for testing:
+# Only installable with poetry (NOT pip).
+coverage = "^7.6.1"
+coverage2clover = "^4.0.0"
+faker = "^26.2.0"
+pytest = "^8.3.2"
+unittest-xml-reporting = "^3.2.0"
+
+[tool.poetry.scripts]
+nightskycam-thumbnails = 'nightskycam_images.main:thumbnails'
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# Coverage.
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+omit = [
+    # For avoiding "No source for code" warnings
+    # for files that should NOT even exist.
+    # Confusion seems to be caused by site-packages.
+    "config-3.py",
+    "config.py",
+]
+
+# isort.
+[tool.isort]
+# Do not distinguish import style (import/from) for sorting.
+force_sort_within_sections = true
+# Use same formatting as black.
+profile = "black"
+
+# flake8 settings are in .flake8 .
