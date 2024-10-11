@@ -15,6 +15,7 @@ pillow = "^10.4.0"
 toml = "^0.10.2"
 tomli = "^2.0.1"
 tomli-w = "^1.0.0"
+numpy = "^1.23.4"
 opencv-python = "4.5.1.48"
 
 [tool.poetry.group.dev]
