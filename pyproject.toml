@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nightskycam-images"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = ["Vincent Berenz <vincent.berenz@tuebingen.mpg.de>"]
 readme = "README.md"
@@ -15,7 +15,7 @@ pillow = "^10.4.0"
 toml = "^0.10.2"
 tomli = "^2.0.1"
 tomli-w = "^1.0.0"
-opencv-python = "^4.10.0.84"
+opencv-python = "4.5.1.48"
 
 [tool.poetry.group.dev]
 optional = true
