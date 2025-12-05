@@ -19,7 +19,7 @@ Its functions include:
 ## Requirements
 
 * Operating system: Linux or macOS
-* Python 3.9+
+* Python 3.12+
 
 ## Getting Started as a User (using `pip`)
 
