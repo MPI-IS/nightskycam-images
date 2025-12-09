@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Nightskycam Image Viewer{% endblock %}</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .thumbnail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+            padding: 1rem 0;
+        }
+
+        .thumbnail-card {
+            background: white;
+            border-radius: 8px;
+            padding: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .thumbnail-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .thumbnail-img {
+            width: 100%;
+            height: auto;
+            border-radius: 4px;
+            background-color: #e9ecef;
+        }
+
+        .thumbnail-info {
+            margin-top: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .modal-body img {
+            max-width: 100%;
+            height: auto;
+        }
+    </style>
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a href="/" class="navbar-brand mb-0 h1">Nightskycam Image Viewer</a>
+            <div class="d-flex">
+                <a href="/list" class="btn btn-outline-light">
+                    Manage List <span id="listCountBadge" class="badge bg-primary">0</span>
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Bootstrap 5 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Update list count badge
+        async function updateListCountBadge() {
+            try {
+                const response = await fetch('/api/list');
+                const list = await response.json();
+                const badge = document.getElementById('listCountBadge');
+                if (badge) {
+                    badge.textContent = list.length;
+                }
+            } catch (error) {
+                console.error('Error updating list count:', error);
+            }
+        }
+
+        // Update on page load
+        document.addEventListener('DOMContentLoaded', updateListCountBadge);
+    </script>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nightskycam Thumbnail Annotator</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .thumbnail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+            padding: 1rem 0;
+        }
+
+        .thumbnail-card {
+            background: white;
+            border-radius: 8px;
+            padding: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
+        }
+
+        .thumbnail-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .thumbnail-img {
+            width: 100%;
+            height: auto;
+            border-radius: 4px;
+            background-color: #e9ecef;
+            margin-bottom: 0.75rem;
+        }
+
+        .classification-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .classification-buttons button {
+            flex: 1;
+            font-weight: bold;
+        }
+
+        .classified-badge {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }
+
+        .count-badge {
+            font-size: 1.1rem;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+        }
+
+        .next-button {
+            font-size: 1.1rem;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a href="/" class="navbar-brand mb-0 h1">Nightskycam Thumbnail Annotator</a>
+            <div class="d-flex gap-3">
+                <span class="count-badge badge bg-success" id="positiveCountBadge">
+                    + <span id="positiveCount">0</span>
+                </span>
+                <span class="count-badge badge bg-danger" id="negativeCountBadge">
+                    - <span id="negativeCount">0</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container-fluid mt-4">
+            <!-- Control buttons -->
+            <div class="row mb-4">
+                <div class="col text-center">
+                    <button id="nextButton" class="btn btn-primary btn-lg next-button" onclick="loadRandomImages()">
+                        Next →
+                    </button>
+                </div>
+            </div>
+
+            <!-- Loading indicator -->
+            <div id="loadingIndicator" class="text-center d-none my-5">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">Loading images...</p>
+            </div>
+
+            <!-- Thumbnail grid -->
+            <div id="thumbnailGrid" class="thumbnail-grid"></div>
+
+            <!-- No images message -->
+            <div id="noImagesMessage" class="alert alert-warning text-center d-none" role="alert">
+                <strong>No images available</strong> matching the configuration criteria.
+            </div>
+        </div>
+    </main>
+
+    <!-- Bootstrap 5 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Load initial counts and images on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            updateCounts();
+            loadRandomImages();
+        });
+
+        async function updateCounts() {
+            try {
+                const response = await fetch('/api/counts');
+                const counts = await response.json();
+
+                document.getElementById('positiveCount').textContent = counts.positive;
+                document.getElementById('negativeCount').textContent = counts.negative;
+            } catch (error) {
+                console.error('Error updating counts:', error);
+            }
+        }
+
+        async function loadRandomImages() {
+            const grid = document.getElementById('thumbnailGrid');
+            const loading = document.getElementById('loadingIndicator');
+            const noImages = document.getElementById('noImagesMessage');
+
+            // Show loading
+            grid.innerHTML = '';
+            noImages.classList.add('d-none');
+            loading.classList.remove('d-none');
+
+            try {
+                const response = await fetch('/api/random-images?count=20');
+                const images = await response.json();
+
+                loading.classList.add('d-none');
+
+                if (images.length === 0) {
+                    noImages.classList.remove('d-none');
+                    return;
+                }
+
+                // Check classification status for each image
+                for (const image of images) {
+                    const classResponse = await fetch(`/api/check-classification/${image.filename}`);
+                    const classData = await classResponse.json();
+                    image.classification = classData.classification;
+                }
+
+                // Create cards for each image
+                images.forEach(image => {
+                    const card = createThumbnailCard(image);
+                    grid.appendChild(card);
+                });
+            } catch (error) {
+                loading.classList.add('d-none');
+                console.error('Error loading images:', error);
+                alert('Error loading images. Please check the console.');
+            }
+        }
+
+        function createThumbnailCard(image) {
+            const card = document.createElement('div');
+            card.className = 'thumbnail-card';
+
+            let badgeHtml = '';
+            if (image.classification === 'positive') {
+                badgeHtml = '<span class="classified-badge badge bg-success">Positive</span>';
+            } else if (image.classification === 'negative') {
+                badgeHtml = '<span class="classified-badge badge bg-danger">Negative</span>';
+            }
+
+            card.innerHTML = `
+                ${badgeHtml}
+                <img src="${image.thumbnail_url}" class="thumbnail-img" alt="${image.filename}" loading="lazy">
+                <div class="classification-buttons">
+                    <button class="btn btn-success classify-btn"
+                            data-system="${image.system}"
+                            data-date="${image.date}"
+                            data-filename="${image.filename}"
+                            data-classification="positive">
+                        + Positive
+                    </button>
+                    <button class="btn btn-danger classify-btn"
+                            data-system="${image.system}"
+                            data-date="${image.date}"
+                            data-filename="${image.filename}"
+                            data-classification="negative">
+                        - Negative
+                    </button>
+                </div>
+            `;
+
+            // Attach event listeners to buttons
+            const buttons = card.querySelectorAll('.classify-btn');
+            buttons.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    classifyImage(
+                        this.dataset.system,
+                        this.dataset.date,
+                        this.dataset.filename,
+                        this.dataset.classification,
+                        card
+                    );
+                });
+            });
+
+            return card;
+        }
+
+        async function classifyImage(system, date, filename, classification, card) {
+            try {
+                const response = await fetch('/api/classify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        system: system,
+                        date: date,
+                        filename: filename,
+                        classification: classification
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // Update counts
+                    document.getElementById('positiveCount').textContent = result.counts.positive;
+                    document.getElementById('negativeCount').textContent = result.counts.negative;
+
+                    // Remove old badge if exists
+                    const oldBadge = card.querySelector('.classified-badge');
+                    if (oldBadge) {
+                        oldBadge.remove();
+                    }
+
+                    // Add new badge
+                    const badge = document.createElement('span');
+                    badge.className = 'classified-badge badge';
+                    if (classification === 'positive') {
+                        badge.classList.add('bg-success');
+                        badge.textContent = 'Positive';
+                    } else {
+                        badge.classList.add('bg-danger');
+                        badge.textContent = 'Negative';
+                    }
+                    card.insertBefore(badge, card.firstChild);
+
+                    // Visual feedback
+                    card.style.transition = 'all 0.3s';
+                    card.style.transform = 'scale(1.05)';
+                    setTimeout(() => {
+                        card.style.transform = 'scale(1)';
+                    }, 300);
+                } else {
+                    alert(result.error || 'Failed to classify image');
+                }
+            } catch (error) {
+                console.error('Error classifying image:', error);
+                alert('Error classifying image. Please check the console.');
+            }
+        }
+    </script>
+</body>
+</html>

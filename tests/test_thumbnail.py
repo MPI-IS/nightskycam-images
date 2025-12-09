@@ -3,12 +3,14 @@ Tests for module: thumbnail.
 """
 
 from pathlib import Path
+import tempfile
 from typing import Generator, Iterable
 
 import cv2
 import pytest
 
 from nightskycam_images.constants import THUMBNAIL_DIR_NAME
+from nightskycam_images.convert_npy import Stretch, to_npy
 from nightskycam_images.thumbnail import (
     _thumbnail_path,
     create_all_thumbnails,
@@ -20,6 +22,21 @@ from tests.conftest import FAKE
 #
 # fixture setup_data: see conftest.py in same directory
 #
+
+
+def test_stretching(setup_data):
+
+    _, image_path_s, _, _ = setup_data
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+
+        for image_path in image_path_s:
+            original = to_npy(image_path)
+            target = image_path.parent / image_path.name
+            Stretch.file(image_path, target)
+            stretched = to_npy(target)
+            assert original.shape == stretched.shape
+            assert original.dtype == stretched.dtype
 
 
 def test_create_thumbnail(setup_data):

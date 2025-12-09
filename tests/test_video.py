@@ -63,7 +63,8 @@ def test_setup_image_array(setup_data):
     # Test by setting up video image for each image
     for image_path, text in zip(image_path_s, text_s):
         # Tested function.
-        image_array = _setup_image_array(image_path, text, video_format)
+        stretch = False
+        image_array = _setup_image_array(image_path, text, video_format, stretch)
 
         # Check: Image shape corresponds to video format size.
         assert image_array.shape == (video_height, video_width, 3)
