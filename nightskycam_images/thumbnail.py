@@ -6,6 +6,8 @@ from typing import Callable, Generator, Iterable, Optional
 
 from PIL import Image as PILImage
 import cv2
+import numpy as np
+import numpy.typing as npt
 
 from .constants import (
     FILE_PERMISSIONS,
@@ -13,7 +15,7 @@ from .constants import (
     THUMBNAIL_FILE_FORMAT,
     THUMBNAIL_WIDTH,
 )
-from .convert_npy import npy_file_to_pil
+from .convert_npy import Stretch, npy_array_to_pil, npy_file_to_pil, to_npy
 from .folder_change import folder_has_changed
 
 logging.getLogger("PIL").setLevel(logging.ERROR)
@@ -21,9 +23,6 @@ logging.getLogger("PIL").setLevel(logging.ERROR)
 _nb_workers = 1 if cpu_count() == 1 else cpu_count() - 1
 
 
-# TODO: confirm.
-#   @Vincent:
-#     Is this still used or is this deprecated code?
 class ThumbnailText:
     def __init__(self) -> None:
         self.position: tuple[int, int] = (0, 20)
@@ -33,13 +32,6 @@ class ThumbnailText:
         self.thickness: int = 1
 
 
-# TODO: refactor?
-#   The functionality is very similar to the property `thumbnail_path`
-#   in `nightskycam_images.image`.
-#
-#   @Vincent:
-#     Would it make sense to combine this with the property `thumbnail_path`
-#     in `nightskycam_images.image`?
 def _thumbnail_path(
     image_path: Path,
     thumbnail_format: str = THUMBNAIL_FILE_FORMAT,
@@ -77,6 +69,7 @@ def create_thumbnail(
     thumbnail_path: Optional[Path] = None,
     thumbnail_width: int = THUMBNAIL_WIDTH,
     thumbnail_format: str = THUMBNAIL_FILE_FORMAT,
+    stretch: bool = True,
     overwrite: bool = False,
     permissions: int = FILE_PERMISSIONS,
 ) -> Path:
@@ -93,6 +86,8 @@ def create_thumbnail(
         Width of the thumbnail image (in pixels).
     thumbnail_format
         File format of the thumbnail image.
+    stretch
+        If True, autostretch will be applied first to the image
     overwrite
         Whether to overwrite an existing thumbnail image file.
     permissions
@@ -113,10 +108,16 @@ def create_thumbnail(
     logging.info("creating thumbnail for %s", image_path.stem)
     thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if image_path.suffix == ".npy":
-        img = npy_file_to_pil(image_path)
+    if not stretch:
+        if image_path.suffix == ".npy":
+            img = npy_file_to_pil(image_path)
+        else:
+            img = PILImage.open(image_path)
+
     else:
-        img = PILImage.open(image_path)
+        array = to_npy(image_path)
+        stretched = Stretch.array(array)
+        img = npy_array_to_pil(stretched)
 
     # Height for the thumbnail image (in pixels).
     # Use same scaling ratio between thumbnail and HD image
@@ -136,9 +137,7 @@ def create_thumbnails(
     image_path_s: Iterable[Path],
     thumbnail_width: int = THUMBNAIL_WIDTH,
     thumbnail_format: str = THUMBNAIL_FILE_FORMAT,
-    # TODO: confirm.
-    #   @Vincent:
-    #     Is it safe to ignore all errors as the default behaviour?
+    stretch: bool = True,
     skip_error: bool = True,
     overwrite: bool = False,
     permissions: int = FILE_PERMISSIONS,
@@ -154,6 +153,8 @@ def create_thumbnails(
         Width of the thumbnail image (in pixels).
     thumbnail_format
         File format of the thumbnail image.
+    stretch
+        If True autostretch will be applied to the images
     skip_error
         Whether to ignore errors.
     overwrite
@@ -176,6 +177,7 @@ def create_thumbnails(
                     image_path,
                     thumbnail_width=thumbnail_width,
                     thumbnail_format=thumbnail_format,
+                    stretch=stretch,
                     overwrite=overwrite,
                     permissions=permissions,
                 )
@@ -196,11 +198,121 @@ def create_thumbnails(
 #     instead of duplicating the documentation?
 #     This might make it easier to maintain the code in the case that
 #     the used function changes?
+def create_missing_thumbnails(
+    root_dir: Path,
+    thumbnail_width: int = THUMBNAIL_WIDTH,
+    thumbnail_format: str = THUMBNAIL_FILE_FORMAT,
+    stretch: bool = True,
+    skip_error: bool = True,
+    dry_run: bool = False,
+    verbose: bool = False,
+    permissions: int = FILE_PERMISSIONS,
+) -> dict[str, int]:
+    """
+    Create thumbnails only for images that are missing them.
+
+    Parameters
+    ----------
+    root_dir
+        Root directory with nightskycam structure (system/date/).
+    thumbnail_width
+        Width of the thumbnail image (in pixels).
+    thumbnail_format
+        File format of the thumbnail image.
+    stretch
+        If True, autostretch will be applied to the images.
+    skip_error
+        Whether to ignore errors.
+    dry_run
+        If True, don't actually create thumbnails.
+    verbose
+        If True, log detailed progress.
+    permissions
+        File permissions for the thumbnail image.
+
+    Returns
+    -------
+    dict
+        Statistics: images_scanned, thumbnails_missing, thumbnails_created, errors
+    """
+    from .constants import IMAGE_FILE_FORMATS
+
+    stats = {
+        "images_scanned": 0,
+        "thumbnails_missing": 0,
+        "thumbnails_created": 0,
+        "errors": 0,
+    }
+
+    if not root_dir.exists() or not root_dir.is_dir():
+        logging.error(f"Root directory does not exist: {root_dir}")
+        return stats
+
+    # Walk through system directories
+    for system_dir in root_dir.iterdir():
+        if not system_dir.is_dir():
+            continue
+
+        if verbose:
+            logging.info(f"Processing system: {system_dir.name}")
+
+        # Walk through date directories
+        for date_dir in system_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+
+            if verbose:
+                logging.info(f"  Processing date: {date_dir.name}")
+
+            # Find all image files
+            for item in date_dir.iterdir():
+                if not item.is_file():
+                    continue
+
+                # Check if it's an image file
+                if item.suffix.lstrip(".") not in IMAGE_FILE_FORMATS:
+                    continue
+
+                stats["images_scanned"] += 1
+
+                # Check if thumbnail exists
+                thumbnail_path = _thumbnail_path(item, thumbnail_format)
+
+                if not thumbnail_path.exists():
+                    stats["thumbnails_missing"] += 1
+
+                    if dry_run:
+                        logging.info(f"[DRY-RUN] Would create thumbnail for: {item}")
+                        stats["thumbnails_created"] += 1
+                    else:
+                        try:
+                            if verbose:
+                                logging.info(f"    Creating thumbnail for: {item.name}")
+                            create_thumbnail(
+                                item,
+                                thumbnail_path=thumbnail_path,
+                                thumbnail_width=thumbnail_width,
+                                thumbnail_format=thumbnail_format,
+                                stretch=stretch,
+                                overwrite=False,
+                                permissions=permissions,
+                            )
+                            stats["thumbnails_created"] += 1
+                        except Exception as e:
+                            logging.error(f"Failed to create thumbnail for {item}: {e}")
+                            stats["errors"] += 1
+                            if not skip_error:
+                                raise
+
+    return stats
+
+
 def create_all_thumbnails(
     walk_folders: Callable[[], Generator[Path, None, None]],
     list_images: Callable[[Path], Iterable[Path]],
     thumbnail_width: int = THUMBNAIL_WIDTH,
     thumbnail_format: str = THUMBNAIL_FILE_FORMAT,
+    stretch: bool = True,
     skip_error: bool = True,
     nb_workers: int = _nb_workers,
     overwrite: bool = False,
@@ -222,6 +334,8 @@ def create_all_thumbnails(
         Width of the thumbnail image (in pixels).
     thumbnail_format
         File format of the thumbnail image.
+    stretch
+        If True autostretch will be applied to the images
     skip_error
         Whether to ignore errors.
     overwrite
@@ -253,6 +367,7 @@ def create_all_thumbnails(
                     image_path_s,
                     thumbnail_width=thumbnail_width,
                     thumbnail_format=thumbnail_format,
+                    stretch=stretch,
                     skip_error=skip_error,
                     overwrite=overwrite,
                     permissions=permissions,

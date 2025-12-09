@@ -1,0 +1,444 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- Filters -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <label for="systemSelect" class="form-label fw-bold">System</label>
+            <select class="form-select" id="systemSelect">
+                <option selected disabled>Select a system...</option>
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label for="dateSelect" class="form-label fw-bold">Date</label>
+            <select class="form-select" id="dateSelect" disabled>
+                <option selected disabled>Select a date...</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Top Navigation -->
+    <div id="topNavigation" class="mb-3 d-none">
+        <button id="topNextButton" class="btn btn-primary" onclick="navigateNext()">
+            Next → <span id="topNextLabel"></span>
+        </button>
+    </div>
+
+    <!-- Image count and Add All button -->
+    <div id="imageCount" class="mb-3 d-flex align-items-center justify-content-between d-none">
+        <div class="text-muted">
+            <strong>Images:</strong> <span id="imageCountNumber">0</span>
+        </div>
+        <button id="addAllButton" class="btn btn-primary btn-sm" onclick="addAllImages()">
+            Add All Images to List
+        </button>
+    </div>
+
+    <!-- Loading indicator -->
+    <div id="loadingIndicator" class="text-center d-none my-5">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <p class="mt-2">Loading images...</p>
+    </div>
+
+    <!-- Thumbnail grid -->
+    <div id="thumbnailGrid" class="thumbnail-grid"></div>
+
+    <!-- Bottom Navigation -->
+    <div id="bottomNavigation" class="mt-3 d-none">
+        <button id="bottomNextButton" class="btn btn-primary" onclick="navigateNext()">
+            Next → <span id="bottomNextLabel"></span>
+        </button>
+    </div>
+
+    <!-- No images message -->
+    <div id="noImagesMessage" class="alert alert-info d-none" role="alert">
+        <strong>No images found</strong> for the selected system and date.
+    </div>
+</div>
+
+<!-- Modal for full-size image -->
+<div class="modal fade" id="imageModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="imageModalLabel">Image Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-center">
+                <img id="modalImage" src="" class="img-fluid" alt="Full size image">
+                <div class="mt-3 text-start">
+                    <p class="mb-1"><strong>Filename:</strong> <span id="modalFilename" class="font-monospace"></span></p>
+                    <p class="mb-0"><strong>Timestamp:</strong> <span id="modalTimestamp"></span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Global variables to track current system and date
+    let currentSystem = null;
+    let currentDate = null;
+    let allSystems = [];
+    let allDates = [];
+
+    // Load systems on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        loadSystems();
+    });
+
+    async function loadSystems() {
+        try {
+            const response = await fetch('/api/systems');
+            const systems = await response.json();
+
+            // Cache systems for navigation
+            allSystems = systems;
+
+            const select = document.getElementById('systemSelect');
+            systems.forEach(system => {
+                const option = document.createElement('option');
+                option.value = system;
+                option.textContent = system;
+                select.appendChild(option);
+            });
+
+            select.addEventListener('change', function() {
+                loadDates(this.value);
+            });
+        } catch (error) {
+            console.error('Error loading systems:', error);
+            alert('Error loading systems. Please check the console.');
+        }
+    }
+
+    async function loadDates(system) {
+        try {
+            const response = await fetch(`/api/dates/${system}`);
+            const dates = await response.json();
+
+            // Cache dates for navigation
+            allDates = dates;
+
+            const select = document.getElementById('dateSelect');
+
+            // Remove old event listener by cloning the element
+            const newSelect = select.cloneNode(false);
+            select.parentNode.replaceChild(newSelect, select);
+
+            newSelect.innerHTML = '<option selected disabled>Select a date...</option>';
+            newSelect.disabled = false;
+
+            dates.forEach(date => {
+                const option = document.createElement('option');
+                option.value = date.value;
+                option.textContent = date.display;
+                newSelect.appendChild(option);
+            });
+
+            // Clear previous images
+            document.getElementById('thumbnailGrid').innerHTML = '';
+            document.getElementById('imageCount').classList.add('d-none');
+            document.getElementById('noImagesMessage').classList.add('d-none');
+            document.getElementById('topNavigation').classList.add('d-none');
+            document.getElementById('bottomNavigation').classList.add('d-none');
+
+            newSelect.addEventListener('change', function() {
+                loadImages(system, this.value);
+            });
+        } catch (error) {
+            console.error('Error loading dates:', error);
+            alert('Error loading dates. Please check the console.');
+        }
+    }
+
+    async function loadImages(system, date) {
+        // Store current system and date
+        currentSystem = system;
+        currentDate = date;
+
+        const grid = document.getElementById('thumbnailGrid');
+        const loading = document.getElementById('loadingIndicator');
+        const noImages = document.getElementById('noImagesMessage');
+        const imageCount = document.getElementById('imageCount');
+        const imageCountNumber = document.getElementById('imageCountNumber');
+
+        // Show loading
+        grid.innerHTML = '';
+        noImages.classList.add('d-none');
+        imageCount.classList.add('d-none');
+        loading.classList.remove('d-none');
+
+        try {
+            const response = await fetch(`/api/images/${system}/${date}`);
+            const images = await response.json();
+
+            loading.classList.add('d-none');
+
+            if (images.length === 0) {
+                noImages.classList.remove('d-none');
+                return;
+            }
+
+            // Show image count
+            imageCountNumber.textContent = images.length;
+            imageCount.classList.remove('d-none');
+
+            images.forEach(image => {
+                const card = createThumbnailCard(image, system, date);
+                grid.appendChild(card);
+            });
+
+            // Update navigation buttons
+            updateNavigationButtons();
+        } catch (error) {
+            loading.classList.add('d-none');
+            console.error('Error loading images:', error);
+            alert('Error loading images. Please check the console.');
+        }
+    }
+
+    function createThumbnailCard(image, system, date) {
+        const card = document.createElement('div');
+        card.className = 'thumbnail-card';
+        card.innerHTML = `
+            <img src="${image.thumbnail_url}" class="thumbnail-img" alt="${image.filename}" loading="lazy" style="cursor: pointer;">
+            <div class="thumbnail-info">
+                <div class="text-truncate text-muted" title="${image.filename}">
+                    <small>${image.filename}</small>
+                </div>
+                <div class="text-muted">
+                    <small>${image.timestamp}</small>
+                </div>
+                <button class="btn btn-success btn-sm w-100 mt-2 add-to-list-btn"
+                        data-system="${system}"
+                        data-date="${date}"
+                        data-filename="${image.filename}">
+                    + Add to List
+                </button>
+            </div>
+        `;
+
+        // Click on image to show modal
+        const img = card.querySelector('.thumbnail-img');
+        img.addEventListener('click', function() {
+            showImageModal(image);
+        });
+
+        // Click on button to add to list
+        const btn = card.querySelector('.add-to-list-btn');
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            addImageToList(system, date, image.filename, btn);
+        });
+
+        return card;
+    }
+
+    function showImageModal(image) {
+        document.getElementById('modalImage').src = image.image_url;
+        document.getElementById('modalFilename').textContent = image.filename;
+        document.getElementById('modalTimestamp').textContent = image.timestamp;
+
+        const modal = new bootstrap.Modal(document.getElementById('imageModal'));
+        modal.show();
+    }
+
+    async function addImageToList(system, date, filename, button) {
+        try {
+            const response = await fetch('/api/list/add', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    system: system,
+                    date: date,
+                    filename: filename
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                button.textContent = '✓ Added';
+                button.classList.remove('btn-success');
+                button.classList.add('btn-secondary');
+                button.disabled = true;
+
+                // Update list count badge
+                updateListCountBadge();
+            } else {
+                alert(result.message || 'Failed to add image to list');
+            }
+        } catch (error) {
+            console.error('Error adding image to list:', error);
+            alert('Error adding image to list');
+        }
+    }
+
+    async function addAllImages() {
+        if (!currentSystem || !currentDate) {
+            alert('Please select a system and date first');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/list/add-all', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    system: currentSystem,
+                    date: currentDate
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                alert(`Added ${result.added} images to list (total: ${result.count})`);
+
+                // Update all buttons to show as added
+                document.querySelectorAll('.add-to-list-btn').forEach(btn => {
+                    btn.textContent = '✓ Added';
+                    btn.classList.remove('btn-success');
+                    btn.classList.add('btn-secondary');
+                    btn.disabled = true;
+                });
+
+                // Update list count badge
+                updateListCountBadge();
+            } else {
+                alert('Failed to add all images to list');
+            }
+        } catch (error) {
+            console.error('Error adding all images:', error);
+            alert('Error adding all images to list');
+        }
+    }
+
+    function getNextSystemDate() {
+        if (!currentSystem || !currentDate) {
+            return null;
+        }
+
+        // Find current date index
+        const currentDateIndex = allDates.findIndex(d => d.value === currentDate);
+
+        if (currentDateIndex === -1) {
+            return null;
+        }
+
+        // Check if there's a next date in current system
+        if (currentDateIndex < allDates.length - 1) {
+            return {
+                system: currentSystem,
+                date: allDates[currentDateIndex + 1].value,
+                display: allDates[currentDateIndex + 1].display
+            };
+        }
+
+        // At last date, check for next system
+        const currentSystemIndex = allSystems.findIndex(s => s === currentSystem);
+
+        if (currentSystemIndex === -1 || currentSystemIndex >= allSystems.length - 1) {
+            return null; // At last system
+        }
+
+        // Return next system with indication that dates need to be loaded
+        return {
+            system: allSystems[currentSystemIndex + 1],
+            date: null, // Will be set after loading dates
+            display: null,
+            needsDateLoad: true
+        };
+    }
+
+    async function navigateNext() {
+        const next = getNextSystemDate();
+
+        if (!next) {
+            return;
+        }
+
+        if (next.needsDateLoad) {
+            // Need to load dates for next system first
+            try {
+                const response = await fetch(`/api/dates/${next.system}`);
+                const dates = await response.json();
+
+                if (dates.length === 0) {
+                    alert('Next system has no dates');
+                    return;
+                }
+
+                // Update cache
+                allDates = dates;
+
+                // Set to first date
+                next.date = dates[0].value;
+                next.display = dates[0].display;
+
+                // Update system selector
+                document.getElementById('systemSelect').value = next.system;
+
+                // Update date selector
+                const dateSelect = document.getElementById('dateSelect');
+                dateSelect.innerHTML = '<option selected disabled>Select a date...</option>';
+                dates.forEach(date => {
+                    const option = document.createElement('option');
+                    option.value = date.value;
+                    option.textContent = date.display;
+                    dateSelect.appendChild(option);
+                });
+                dateSelect.value = next.date;
+                dateSelect.disabled = false;
+
+            } catch (error) {
+                console.error('Error loading next system dates:', error);
+                alert('Error loading next system');
+                return;
+            }
+        } else {
+            // Just update date selector
+            document.getElementById('dateSelect').value = next.date;
+        }
+
+        // Load images for next system/date
+        loadImages(next.system, next.date);
+    }
+
+    function updateNavigationButtons() {
+        const next = getNextSystemDate();
+
+        const topNav = document.getElementById('topNavigation');
+        const bottomNav = document.getElementById('bottomNavigation');
+        const topLabel = document.getElementById('topNextLabel');
+        const bottomLabel = document.getElementById('bottomNextLabel');
+
+        if (next) {
+            let label;
+            if (next.needsDateLoad) {
+                label = `${next.system} (first date)`;
+            } else {
+                label = `${next.system} / ${next.display}`;
+            }
+
+            topLabel.textContent = label;
+            bottomLabel.textContent = label;
+            topNav.classList.remove('d-none');
+            bottomNav.classList.remove('d-none');
+        } else {
+            topNav.classList.add('d-none');
+            bottomNav.classList.add('d-none');
+        }
+    }
+</script>
+{% endblock %}

@@ -4,6 +4,7 @@ Fixtures shared by multiple test modules.
 
 import logging
 from pathlib import Path
+import random
 import tempfile
 import time
 from typing import Generator, List, Tuple
@@ -30,6 +31,7 @@ FAKE.seed_instance(SEED)
     params=[
         {"date_dir_num": 1, "image_file_format": "npy"},
         {"date_dir_num": 1, "image_file_format": "jpg"},
+        {"date_dir_num": 1, "image_file_format": "tiff"},
     ]
 )
 def setup_data(
@@ -79,11 +81,19 @@ def setup_data(
 
             # Generate numpy images of random sizes.
             for i in range(IMAGE_BATCH_SIZE):
+
+                type_: type[np.uint8] | type[np.uint16]
+
+                if image_file_format == "jpg":
+                    type_ = np.uint8
+                else:
+                    type_ = random.choice((np.uint8, np.uint16))
+
                 image_array = np.random.randint(
                     0,
-                    255,
+                    np.iinfo(type_).max,
                     (i + 1 + 480, i + 1 + 360, 3),  # (height, width, RGB)
-                    dtype=np.uint8,
+                    dtype=type_,
                 )
 
                 # Pickled numpy array format.
@@ -93,7 +103,7 @@ def setup_data(
                     np.save(image_path, image_array)
 
                 # jpg format.
-                elif image_file_format == "jpg":
+                elif image_file_format in ("jpg", "tiff"):
                     # Convert numpy array to image.
                     image_path = date_dir_path / f"image_{i}.{image_file_format}"
                     cv2.imwrite(str(image_path), image_array)

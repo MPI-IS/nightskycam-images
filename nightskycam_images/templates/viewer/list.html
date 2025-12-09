@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Image List Management</h2>
+        <div>
+            <a href="/" class="btn btn-secondary me-2">← Back to Viewer</a>
+            <button onclick="exportList()" class="btn btn-success me-2">Export to Text</button>
+            <button onclick="clearList()" class="btn btn-danger">Clear All</button>
+        </div>
+    </div>
+
+    <!-- List count -->
+    <div id="listCount" class="mb-3 text-muted">
+        <strong>Total images:</strong> <span id="listCountNumber">0</span>
+    </div>
+
+    <!-- Empty list message -->
+    <div id="emptyMessage" class="alert alert-info d-none" role="alert">
+        <strong>List is empty</strong><br>
+        Go to the <a href="/">viewer</a> to add images to your list.
+    </div>
+
+    <!-- Image list table -->
+    <div id="listTable" class="table-responsive">
+        <table class="table table-striped table-hover">
+            <thead>
+                <tr>
+                    <th style="width: 100px;">Preview</th>
+                    <th>System</th>
+                    <th>Date</th>
+                    <th>Filename</th>
+                    <th style="width: 100px;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="listTableBody">
+                <!-- List items will be populated here -->
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Load list on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        loadList();
+    });
+
+    async function loadList() {
+        try {
+            const response = await fetch('/api/list');
+            const list = await response.json();
+
+            displayList(list);
+        } catch (error) {
+            console.error('Error loading list:', error);
+            alert('Error loading list. Please check the console.');
+        }
+    }
+
+    function displayList(list) {
+        const listCountNumber = document.getElementById('listCountNumber');
+        const emptyMessage = document.getElementById('emptyMessage');
+        const listTable = document.getElementById('listTable');
+        const tbody = document.getElementById('listTableBody');
+
+        listCountNumber.textContent = list.length;
+
+        if (list.length === 0) {
+            emptyMessage.classList.remove('d-none');
+            listTable.classList.add('d-none');
+            return;
+        }
+
+        emptyMessage.classList.add('d-none');
+        listTable.classList.remove('d-none');
+
+        // Clear table
+        tbody.innerHTML = '';
+
+        // Populate table
+        list.forEach((item, index) => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>
+                    <img src="/api/thumbnail/${item.system}/${item.date}/${item.filename}"
+                         alt="Thumbnail"
+                         class="img-thumbnail"
+                         style="max-width: 80px; max-height: 80px; cursor: pointer;"
+                         onclick="showImageModal('${item.system}', '${item.date}', '${item.filename}')">
+                </td>
+                <td>${item.system}</td>
+                <td>${item.date.replace(/_/g, '-')}</td>
+                <td class="font-monospace"><small>${item.filename}</small></td>
+                <td>
+                    <button onclick="removeImage(${index})" class="btn btn-sm btn-danger">Remove</button>
+                </td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
+    async function removeImage(index) {
+        if (!confirm('Remove this image from the list?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/list/remove/${index}`, {
+                method: 'DELETE'
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Reload list
+                loadList();
+                // Update badge in navbar
+                updateListCountBadge();
+            } else {
+                alert('Failed to remove image');
+            }
+        } catch (error) {
+            console.error('Error removing image:', error);
+            alert('Error removing image');
+        }
+    }
+
+    async function clearList() {
+        if (!confirm('Clear entire list? This cannot be undone.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/list/clear', {
+                method: 'DELETE'
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Reload list
+                loadList();
+                // Update badge in navbar
+                updateListCountBadge();
+            } else {
+                alert('Failed to clear list');
+            }
+        } catch (error) {
+            console.error('Error clearing list:', error);
+            alert('Error clearing list');
+        }
+    }
+
+    function exportList() {
+        window.location.href = '/api/list/export';
+    }
+
+    function showImageModal(system, date, filename) {
+        // Open full-size image in new window/tab
+        window.open(`/api/image/${system}/${date}/${filename}`, '_blank');
+    }
+</script>
+{% endblock %}

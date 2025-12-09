@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from .constants import FILE_PERMISSIONS
-from .convert_npy import npy_file_to_numpy
+from .convert_npy import Stretch, npy_file_to_numpy
 from .folder_change import folder_has_changed
 
 # TODO: Confirm.
@@ -24,7 +24,7 @@ from .folder_change import folder_has_changed
 class TextFormat:
     def __init__(self) -> None:
         self.position: tuple[int, int] = (10, 50)
-        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.font = "FONT_HERSHEY_SIMPLEX"
         self.font_scale: int = 1
         self.color: tuple[int, int, int] = (255, 0, 0)
         self.thickness: int = 2
@@ -141,7 +141,7 @@ def _write_to_image(image: np.ndarray, text: str, text_format: TextFormat) -> No
         image,
         text,
         text_format.position,
-        text_format.font,
+        getattr(cv2, text_format.font),
         text_format.font_scale,
         text_format.color,
         text_format.thickness,
@@ -149,7 +149,7 @@ def _write_to_image(image: np.ndarray, text: str, text_format: TextFormat) -> No
 
 
 def _setup_image_array(
-    image_path: Path, text: Optional[str], video_format: VideoFormat
+    image_path: Path, text: Optional[str], video_format: VideoFormat, stretch: bool
 ) -> Optional[np.ndarray]:
     """
     Set up image array in preparation for creating video:
@@ -170,13 +170,23 @@ def _setup_image_array(
     np.ndarray
         Numpy array of the result image.
     """
+    
+    image_array: np.ndarray
+
     # If it is a numpy pickle file.
     if image_path.suffix == ".npy":
         # Load pickled array from file.
         image_array = npy_file_to_numpy(image_path)
     # If it is NOT a numpy pickle file.
     else:
-        image_array = cv2.imread(str(image_path))
+        image_array_ = cv2.imread(str(image_path))
+        if image_array_ is not None:
+            image_array = image_array_
+        else:
+            raise ValueError(f"Failed to read image from {image_path}")
+
+    if stretch:
+        image_array = Stretch.array(image_array)
 
     # Resize image to set video format size.
     image_array = cv2.resize(image_array, video_format.size)
@@ -212,6 +222,7 @@ def _write_video(
     text_s: Iterable[Optional[str]] = tuple(),
     video_format: VideoFormat = _video_format,
     permissions: int = FILE_PERMISSIONS,
+    stretch: bool = True,
 ) -> None:
     """
     Write video to file.
@@ -231,7 +242,7 @@ def _write_video(
     """
     with _get_video_writer(video_path, video_format) as writer:
         for image, text in zip(image_path_s, text_s):
-            image_array = _setup_image_array(image, text, video_format)
+            image_array = _setup_image_array(image, text, video_format, stretch)
             if image_array is not None:
                 writer.write(image_array)
     # Set file permissions.
@@ -244,6 +255,7 @@ def _create_video(
     text_s: Sequence[Optional[str]] = tuple(),
     video_format: VideoFormat = _video_format,
     permissions: int = FILE_PERMISSIONS,
+    stretch: bool = True,
 ) -> None:
     """
     Write/overwrite video file, if necessary.
@@ -273,7 +285,9 @@ def _create_video(
         logging.info(
             "using %s images to create video %s.", len(image_path_s), video_path
         )
-        _write_video(video_path, image_path_s, text_s, video_format, permissions)
+        _write_video(
+            video_path, image_path_s, text_s, video_format, permissions, stretch
+        )
         return
 
     # If there is already an existing video file.
@@ -292,7 +306,7 @@ def _create_video(
     logging.info("adding %s new images to %s", len(image_path_s) - n_frames, video_path)
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_output = Path(tmp_dir) / f"out.{video_format.format}"
-        _write_video(tmp_output, image_path_s, text_s, video_format)
+        _write_video(tmp_output, image_path_s, text_s, video_format, stretch)
         # Replace existing video file.
         shutil.move(str(tmp_output), video_path)
     # Set file permissions.
@@ -304,9 +318,7 @@ def create_video(
     image_path_s: Sequence[Path],
     text_s: Sequence[Optional[str]] = tuple(),
     video_format: VideoFormat = _video_format,
-    # TODO: confirm.
-    #   @Vincent:
-    #     Is it safe to ignore all errors as the default behaviour?
+    stretch: bool = True,
     skip_error: bool = True,
     permissions: int = FILE_PERMISSIONS,
 ) -> None:
@@ -338,6 +350,7 @@ def create_video(
             text_s=text_s,
             video_format=video_format,
             permissions=permissions,
+            stretch=stretch,
         )
     except Exception as e:
         logging.error("failed to create/update video %s: %s", video_path, e)
@@ -353,6 +366,7 @@ def create_all_videos(
     list_images: Callable[[Path], Sequence[Path]],
     extract_text: Callable[[Path], str],
     video_format: VideoFormat = _video_format,
+    stretch: bool = True,
     skip_error: bool = True,
     nb_workers: int = _nb_workers,
     history: Optional[dict[Path, Optional[float]]] = None,
@@ -370,6 +384,7 @@ def create_all_videos(
                     images,
                     texts,
                     video_format,
+                    stretch,
                     skip_error,
                     permissions=permissions,
                 )
