@@ -1,4 +1,5 @@
 import datetime as dt
+import random
 from pathlib import Path
 from typing import (
     Any,
@@ -451,16 +452,24 @@ def get_images(
     # Directory containing thumbnail images.
     thumbnail_dir_path = date_dir_path / THUMBNAIL_DIR_NAME
 
-    # If thumbnail directory does NOT exist.
-    if not thumbnail_dir_path.is_dir():
+    try:
+        # If thumbnail directory does NOT exist.
+        if not thumbnail_dir_path.is_dir():
+            return []
+
+        thumbnail_file_paths: List[Path] = [
+            file_path
+            # Note: iterdir is not ordered.
+            for file_path in thumbnail_dir_path.iterdir()
+            if file_path.is_file() and file_path.suffix == f".{THUMBNAIL_FILE_FORMAT}"
+        ]
+    except PermissionError:
+        logger.warning(f"Permission denied accessing thumbnails directory: {thumbnail_dir_path}")
+        return []
+    except OSError as e:
+        logger.warning(f"OS error accessing thumbnails directory {thumbnail_dir_path}: {e}")
         return []
 
-    thumbnail_file_paths: List[Path] = [
-        file_path
-        # Note: iterdir is not ordered.
-        for file_path in thumbnail_dir_path.iterdir()
-        if file_path.is_file() and file_path.suffix == f".{THUMBNAIL_FILE_FORMAT}"
-    ]
     return [
         # Convert path to image instance.
         _get_image_instance(
@@ -901,6 +910,8 @@ def filter_and_export_images(
     process_not_substring: Optional[str] = None,
     cloud_cover_range: Optional[tuple[int, int]] = None,
     weather_values: Optional[Union[str, List[str]]] = None,
+    nb_images: Optional[int] = None,
+    folder_step: Optional[int] = None,
 ) -> None:
     """
     Filter images based on criteria and create symlinks in output directory.
@@ -949,6 +960,15 @@ def filter_and_export_images(
         Tuple of (min_cover, max_cover) for cloud cover filtering.
     weather_values
         Weather value(s) to match.
+    nb_images
+        If a positive integer, only create symlinks for a maximum of nb_images
+        randomly selected from the images that pass the filter. If None or 0,
+        all matching images are exported.
+    folder_step
+        If a positive integer, process only every Nth folder (date directory).
+        The starting folder is randomly selected between 0 and folder_step-1,
+        so different runs will process different subsets of folders.
+        If None or 0, all folders are processed.
 
     Returns
     -------
@@ -1002,6 +1022,13 @@ def filter_and_export_images(
     if cache_process_filter:
         logger.info(f"Process caching enabled (applies only to process filters)")
 
+    # Folder step configuration
+    folder_offset = 0
+    if folder_step is not None and folder_step > 0:
+        # Randomly select starting offset between 0 and folder_step-1
+        folder_offset = random.randint(0, folder_step - 1)
+        logger.info(f"Folder step: processing every {folder_step} folder(s), starting at offset {folder_offset}")
+
     # First pass: count total folders to process for progress tracking
     total_folders = 0
     if progress_callback is not None:
@@ -1018,6 +1045,11 @@ def filter_and_export_images(
     total_matched = 0
     symlinks_created = 0
     processed_folders = 0
+    skipped_folders = 0
+
+    # Storage for matched images (if nb_images is specified)
+    # List of tuples: (image_path, toml_path, output_subdir)
+    matched_images: List[Tuple[Path, Optional[Path], Path]] = []
 
     # Iterate through systems
     for system_path in walk_systems(root):
@@ -1030,11 +1062,23 @@ def filter_and_export_images(
 
         logger.info(f"Processing system: {system_name}")
 
+        # Folder counter for folder_step
+        folder_counter = 0
+
         # Iterate through dates in the system
         for date_, date_path in walk_dates(system_path):
             # Filter by date range
             if not _is_within_date_range(date_, start_date, end_date):
                 continue
+
+            # Apply folder_step filtering
+            if folder_step is not None and folder_step > 0:
+                if (folder_counter - folder_offset) % folder_step != 0:
+                    folder_counter += 1
+                    skipped_folders += 1
+                    logger.debug(f"Skipping folder (folder_step): {system_name}/{date_.strftime(DATE_FORMAT_FILE)}")
+                    continue
+                folder_counter += 1
 
             # Call progress callback and check for cancellation
             if progress_callback is not None:
@@ -1048,6 +1092,7 @@ def filter_and_export_images(
 
             # Track statistics for this specific folder
             folder_symlinks_created = 0
+            folder_matched = 0
             folder_missing_toml = 0
             folder_missing_keys = 0
             folder_filtered_out = 0
@@ -1160,23 +1205,29 @@ def filter_and_export_images(
 
                 # Image matches all filters
                 total_matched += 1
+                folder_matched += 1
 
-                # Create symlinks in the structured output directory
-                # Symlink for image file
-                image_dest = output_subdir / image_path.name
-                if _create_symlink_safe(image_path, image_dest):
-                    symlinks_created += 1
-                    folder_symlinks_created += 1
-
-                # Symlink for toml file (if exists)
-                if toml_path is not None:
-                    toml_dest = output_subdir / toml_path.name
-                    if _create_symlink_safe(toml_path, toml_dest):
+                # If nb_images is specified, collect matched images for later random selection
+                # Otherwise, create symlinks immediately
+                if nb_images is not None and nb_images > 0:
+                    matched_images.append((image_path, toml_path, output_subdir))
+                else:
+                    # Create symlinks in the structured output directory
+                    # Symlink for image file
+                    image_dest = output_subdir / image_path.name
+                    if _create_symlink_safe(image_path, image_dest):
                         symlinks_created += 1
                         folder_symlinks_created += 1
 
+                    # Symlink for toml file (if exists)
+                    if toml_path is not None:
+                        toml_dest = output_subdir / toml_path.name
+                        if _create_symlink_safe(toml_path, toml_dest):
+                            symlinks_created += 1
+                            folder_symlinks_created += 1
+
             # Log results for this folder
-            if folder_symlinks_created > 0:
+            if folder_matched > 0:
                 skip_parts = []
                 if folder_missing_toml > 0:
                     skip_parts.append(f"{folder_missing_toml} missing TOML")
@@ -1186,7 +1237,12 @@ def filter_and_export_images(
                     skip_parts.append(f"{folder_filtered_out} filtered out")
 
                 skip_msg = f", skipped {' + '.join(skip_parts)}" if skip_parts else ""
-                logger.info(f"  Created {folder_symlinks_created} symlinks{skip_msg}")
+
+                # Show different messages based on whether symlinks were created immediately or collected
+                if nb_images is not None and nb_images > 0:
+                    logger.info(f"  Matched {folder_matched} images{skip_msg}")
+                else:
+                    logger.info(f"  Created {folder_symlinks_created} symlinks{skip_msg}")
             else:
                 # Count total skipped for better reporting
                 total_skipped = (
@@ -1204,8 +1260,30 @@ def filter_and_export_images(
                 else:
                     logger.info(f"  No images found")
 
+    # If nb_images was specified, perform random selection and create symlinks
+    if nb_images is not None and nb_images > 0 and matched_images:
+        logger.info(f"Randomly selecting {min(nb_images, len(matched_images))} images from {len(matched_images)} matched images")
+
+        # Randomly select images
+        selected_images = random.sample(matched_images, min(nb_images, len(matched_images)))
+
+        # Create symlinks for selected images
+        for image_path, toml_path, output_subdir in selected_images:
+            # Create symlink for image file
+            image_dest = output_subdir / image_path.name
+            if _create_symlink_safe(image_path, image_dest):
+                symlinks_created += 1
+
+            # Create symlink for toml file (if exists)
+            if toml_path is not None:
+                toml_dest = output_subdir / toml_path.name
+                if _create_symlink_safe(toml_path, toml_dest):
+                    symlinks_created += 1
+
     # Log summary
     logger.info(f"Filtering complete!")
+    if folder_step is not None and folder_step > 0:
+        logger.info(f"Total folders skipped (folder_step): {skipped_folders}")
     logger.info(f"Total images scanned: {total_scanned}")
     logger.info(f"Total images matched: {total_matched}")
     logger.info(f"Total symlinks created: {symlinks_created}")

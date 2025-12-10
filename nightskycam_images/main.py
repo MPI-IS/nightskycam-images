@@ -52,182 +52,192 @@ _video_format = VideoFormat()
 
 
 def thumbnails():
-    parser = argparse.ArgumentParser(description="list the thumbnails folders")
-    parser.add_argument("folder_path", type=str, help="Path to the folder")
-    args = parser.parse_args()
-    p = Path(args.folder_path)
-    if not p.is_dir():
-        sys.stderr.write(
-            f"The path {args.folder_path} does not exist or is not a directory."
-        )
-        sys.exit(1)
+    """List the thumbnails folders."""
+    app = typer.Typer(help="List the thumbnails folders")
 
-    for tp in walk_thumbnails(p):
-        sys.stdout.write(f"{tp}\n")
-    sys.exit(0)
+    @app.command()
+    def run(
+        folder_path: Path = typer.Argument(
+            ...,
+            help="Path to the folder",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ) -> None:
+        """List the thumbnails folders in the specified directory."""
+        for tp in walk_thumbnails(folder_path):
+            typer.echo(f"{tp}")
+
+    app()
 
 
 def stats():
-    """
-    CLI entry point for generating statistics reports.
-    """
-    parser = argparse.ArgumentParser(
-        description="Generate statistics report for nightskycam images"
-    )
-    parser.add_argument(
-        "folder_path", type=str, help="Path to the media root directory"
-    )
-    args = parser.parse_args()
+    """CLI entry point for generating statistics reports."""
+    app = typer.Typer(help="Generate statistics report for nightskycam images")
 
-    p = Path(args.folder_path)
-    if not p.is_dir():
-        sys.stderr.write(
-            f"The path {args.folder_path} does not exist or is not a directory.\n"
-        )
-        sys.exit(1)
+    @app.command()
+    def run(
+        folder_path: Path = typer.Argument(
+            ...,
+            help="Path to the media root directory",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ) -> None:
+        """Generate statistics report for nightskycam images."""
+        try:
+            generate_stats_report(folder_path)
+        except Exception as e:
+            typer.echo(f"Error generating statistics: {e}", err=True)
+            raise typer.Exit(code=1)
 
-    try:
-        generate_stats_report(p)
-        sys.exit(0)
-    except Exception as e:
-        sys.stderr.write(f"Error generating statistics: {e}\n")
-        sys.exit(1)
+    app()
 
 
 def view_webapp():
-    """
-    CLI entry point for the image viewer web application.
-    """
-    parser = argparse.ArgumentParser(
-        description="Start the Nightskycam image viewer web application"
-    )
-    parser.add_argument(
-        "root_dir",
-        type=str,
-        help="Path to the root directory (original or filtered structure)",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="Host to bind to (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=5002, help="Port to bind to (default: 5002)"
-    )
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    """CLI entry point for the image viewer web application."""
+    app = typer.Typer(help="Start the Nightskycam image viewer web application")
 
-    args = parser.parse_args()
+    @app.command()
+    def run(
+        root_dir: Path = typer.Argument(
+            ...,
+            help="Path to the root directory (original or filtered structure)",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        host: str = typer.Option(
+            "127.0.0.1",
+            "--host",
+            help="Host to bind to",
+        ),
+        port: int = typer.Option(
+            5002,
+            "--port",
+            help="Port to bind to",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug mode",
+        ),
+    ) -> None:
+        """Start the Nightskycam image viewer web application."""
+        # Import the Flask app from view_webapp module
+        flask_app = create_view_app(root_dir)
 
-    root_path = Path(args.root_dir)
-    if not root_path.exists() or not root_path.is_dir():
-        sys.stderr.write(
-            f"Error: {args.root_dir} does not exist or is not a directory.\n"
-        )
-        sys.exit(1)
+        typer.echo(f"Starting Nightskycam Image Viewer on http://{host}:{port}")
+        typer.echo(f"Root directory: {root_dir}")
+        typer.echo("Press Ctrl+C to stop")
 
-    # Import the Flask app from view_webapp module
-    app = create_view_app(root_path)
+        try:
+            flask_app.run(host=host, port=port, debug=debug)
+        except KeyboardInterrupt:
+            typer.echo("\nShutting down...")
+            raise typer.Exit(code=0)
 
-    print(f"Starting Nightskycam Image Viewer on http://{args.host}:{args.port}")
-    print(f"Root directory: {root_path}")
-    print("Press Ctrl+C to stop")
-
-    try:
-        app.run(host=args.host, port=args.port, debug=args.debug)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        sys.exit(0)
+    app()
 
 
 def annotator_webapp():
-    """
-    CLI entry point for the thumbnail annotator web application.
-    """
-    parser = argparse.ArgumentParser(
-        description="Start the Nightskycam thumbnail annotator web application"
-    )
-    parser.add_argument(
-        "config_path",
-        type=str,
-        nargs="?",
-        help="Path to TOML configuration file",
-    )
-    parser.add_argument(
-        "--create-config",
-        action="store_true",
-        help="Create a default configuration file and exit",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="Host to bind to (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=5003, help="Port to bind to (default: 5003)"
-    )
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    """CLI entry point for the thumbnail annotator web application."""
+    app = typer.Typer(help="Start the Nightskycam thumbnail annotator web application")
 
-    args = parser.parse_args()
+    @app.command()
+    def run(
+        config_path: Optional[Path] = typer.Argument(
+            None,
+            help="Path to TOML configuration file",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        create_config: bool = typer.Option(
+            False,
+            "--create-config",
+            help="Create a default configuration file and exit",
+        ),
+        host: str = typer.Option(
+            "127.0.0.1",
+            "--host",
+            help="Host to bind to",
+        ),
+        port: int = typer.Option(
+            5003,
+            "--port",
+            help="Port to bind to",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug mode",
+        ),
+    ) -> None:
+        """Start the Nightskycam thumbnail annotator web application."""
+        # Handle --create-config flag
+        if create_config:
+            output_path = Path.cwd() / "nightskycam_thumbnails_annotator_config.toml"
+            if output_path.exists():
+                typer.echo(
+                    f"Error: Configuration file already exists at {output_path}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
 
-    # Handle --create-config flag
-    if args.create_config:
-        output_path = Path.cwd() / "nightskycam_thumbnails_annotator_config.toml"
-        if output_path.exists():
-            sys.stderr.write(
-                f"Error: Configuration file already exists at {output_path}\n"
+            try:
+                default_config = {
+                    "root_dir": "/path/to/media/root",
+                    "output_dir": "/path/to/output",
+                    "systems": [],  # Empty list means all systems
+                    "start_date": "",  # Empty means no start limit (format: YYYY-MM-DD)
+                    "end_date": "",  # Empty means no end limit (format: YYYY-MM-DD)
+                }
+                _save_config(default_config, output_path)
+                typer.echo(f"Created default configuration file: {output_path}")
+                typer.echo("Edit this file with your desired settings, then run:")
+                typer.echo(f"  nightskycam-thumbnails-annotator-webapp {output_path}")
+            except Exception as e:
+                typer.echo(f"Error creating configuration file: {e}", err=True)
+                raise typer.Exit(code=1)
+
+            raise typer.Exit(code=0)
+
+        # Require config_path if not creating config
+        if config_path is None:
+            typer.echo(
+                "Error: You must provide a config file path or use --create-config\n\n"
+                "Usage:\n"
+                "  nightskycam-thumbnails-annotator-webapp --create-config       # Create default config\n"
+                "  nightskycam-thumbnails-annotator-webapp <config.toml>         # Run with config file",
+                err=True,
             )
-            sys.exit(1)
+            raise typer.Exit(code=1)
+
+        # Import the Flask app from annotator_webapp module
+        try:
+            flask_app = create_annotator_app(config_path)
+        except Exception as e:
+            typer.echo(f"Error loading configuration: {e}", err=True)
+            raise typer.Exit(code=1)
+
+        typer.echo(f"Starting Nightskycam Image Annotator on http://{host}:{port}")
+        typer.echo(f"Configuration file: {config_path}")
+        typer.echo("Press Ctrl+C to stop")
 
         try:
-            default_config = {
-                "root_dir": "/path/to/media/root",
-                "output_dir": "/path/to/output",
-                "systems": [],  # Empty list means all systems
-                "start_date": "",  # Empty means no start limit (format: YYYY-MM-DD)
-                "end_date": "",  # Empty means no end limit (format: YYYY-MM-DD)
-            }
-            _save_config(default_config, output_path)
-            print(f"Created default configuration file: {output_path}")
-            print("Edit this file with your desired settings, then run:")
-            print(f"  nightskycam-thumbnails-annotator-webapp {output_path}")
-            sys.exit(0)
-        except Exception as e:
-            sys.stderr.write(f"Error creating configuration file: {e}\n")
-            sys.exit(1)
+            flask_app.run(host=host, port=port, debug=debug)
+        except KeyboardInterrupt:
+            typer.echo("\nShutting down...")
+            raise typer.Exit(code=0)
 
-    # Require config_path if not creating config
-    if args.config_path is None:
-        sys.stderr.write(
-            "Error: You must provide a config file path or use --create-config\n\n"
-            "Usage:\n"
-            "  nightskycam-thumbnails-annotator-webapp --create-config       # Create default config\n"
-            "  nightskycam-thumbnails-annotator-webapp <config.toml>         # Run with config file\n"
-        )
-        sys.exit(1)
-
-    config_path = Path(args.config_path)
-    if not config_path.exists():
-        sys.stderr.write(f"Error: Configuration file not found: {config_path}\n")
-        sys.exit(1)
-
-    # Import the Flask app from annotator_webapp module
-    try:
-        app = create_annotator_app(config_path)
-    except Exception as e:
-        sys.stderr.write(f"Error loading configuration: {e}\n")
-        sys.exit(1)
-
-    print(f"Starting Nightskycam Image Annotator on http://{args.host}:{args.port}")
-    print(f"Configuration file: {config_path}")
-    print("Press Ctrl+C to stop")
-
-    try:
-        app.run(host=args.host, port=args.port, debug=args.debug)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        sys.exit(0)
+    app()
 
 
 def _list_images(current: Path) -> list[Path]:
@@ -238,112 +248,119 @@ def _list_images(current: Path) -> list[Path]:
 
 
 def save_patches() -> None:
-    """CLI entry point to save patches from a file or folder.
+    """CLI entry point to save patches from a file or folder."""
+    app = typer.Typer(help="Save patches from image or folder")
 
-    Usage examples:
-      nightskycam-save-patches <path> <output_dir> -m 0 -s 256 -l 0 --overwrite
-    """
-    parser = argparse.ArgumentParser(description="Save patches from image or folder")
-    parser.add_argument(
-        "path", type=str, help="Path to an image file or a folder containing images"
-    )
-    parser.add_argument("output_dir", type=str, help="Directory to write patches into")
-    parser.add_argument(
-        "-m", "--margin", type=int, default=0, help="Pixels to trim from each border"
-    )
-    parser.add_argument(
-        "-s",
-        "--patch-size",
-        type=int,
-        default=256,
-        help="Side length of square patches",
-    )
-    parser.add_argument(
-        "-l",
-        "--overlap",
-        type=int,
-        default=0,
-        help="Overlap in pixels between neighboring patches",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing output files if present",
-    )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Enable verbose debug logging"
-    )
+    @app.command()
+    def run(
+        path: Path = typer.Argument(
+            ...,
+            help="Path to an image file or a folder containing images",
+            exists=True,
+            resolve_path=True,
+        ),
+        output_dir: Path = typer.Argument(
+            ...,
+            help="Directory to write patches into",
+            resolve_path=True,
+        ),
+        margin: int = typer.Option(
+            0,
+            "-m",
+            "--margin",
+            help="Pixels to trim from each border",
+        ),
+        patch_size: int = typer.Option(
+            256,
+            "-s",
+            "--patch-size",
+            help="Side length of square patches",
+        ),
+        overlap: int = typer.Option(
+            0,
+            "-l",
+            "--overlap",
+            help="Overlap in pixels between neighboring patches",
+        ),
+        overwrite: bool = typer.Option(
+            False,
+            "--overwrite",
+            help="Overwrite existing output files if present",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose debug logging",
+        ),
+    ) -> None:
+        """Save patches from image or folder.
 
-    args = parser.parse_args()
+        Usage examples:
+          nightskycam-save-patches <path> <output_dir> -m 0 -s 256 -l 0 --overwrite
+        """
+        # Configure logging
+        logger.remove()
+        if verbose:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
 
-    # Configure logging
-    logger.remove()
-    if args.verbose:
-        logger.add(sys.stderr, level="DEBUG")
-    else:
-        logger.add(sys.stderr, level="INFO")
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    path = Path(args.path)
-    output_dir = Path(args.output_dir)
+        # If path is a file, process single image
+        if path.is_file():
+            logger.info("Processing single image: %s", path)
+            try:
+                patches = load_image_and_extract_patches(
+                    path,
+                    margin=margin,
+                    patch_size=patch_size,
+                    overlap=overlap,
+                )
+            except Exception as e:
+                logger.exception("Failed to load and extract patches from %s: %s", path, e)
+                raise typer.Exit(code=3)
 
-    if not path.exists():
-        logger.error("Path does not exist: %s", path)
-        sys.exit(2)
+            suffix = path.suffix or ".jpg"
+            stem = path.stem
+            n_saved = 0
+            for i, patch in enumerate(patches):
+                out_path = output_dir / f"{stem}_{i}{suffix}"
+                if out_path.exists() and not overwrite:
+                    logger.warning("Skipping existing file (overwrite=False): %s", out_path)
+                    continue
+                iio.imwrite(out_path, patch)
+                n_saved += 1
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Saved %d patches to %s", n_saved, output_dir)
+            return
 
-    # If path is a file, process single image
-    if path.is_file():
-        logger.info("Processing single image: %s", path)
-        try:
-            patches = load_image_and_extract_patches(
-                path,
-                margin=args.margin,
-                patch_size=args.patch_size,
-                overlap=args.overlap,
+        # If path is directory, delegate to save_patches_from_folder
+        if path.is_dir():
+            logger.info("Processing folder: %s", path)
+            try:
+                counts = save_patches_from_folder(
+                    input_folder=path,
+                    output_folder=output_dir,
+                    margin=margin,
+                    patch_size=patch_size,
+                    overlap=overlap,
+                    overwrite=overwrite,
+                )
+            except Exception as e:
+                logger.exception("Failed to save patches from folder %s: %s", path, e)
+                raise typer.Exit(code=4)
+
+            total = sum(counts.values())
+            logger.info(
+                "Saved %d patches for %d files to %s", total, len(counts), output_dir
             )
-        except Exception as e:
-            logger.exception("Failed to load and extract patches from %s: %s", path, e)
-            sys.exit(3)
+            return
 
-        suffix = path.suffix or ".jpg"
-        stem = path.stem
-        n_saved = 0
-        for i, patch in enumerate(patches):
-            out_path = output_dir / f"{stem}_{i}{suffix}"
-            if out_path.exists() and not args.overwrite:
-                logger.warning("Skipping existing file (overwrite=False): %s", out_path)
-                continue
-            iio.imwrite(out_path, patch)
-            n_saved += 1
+        logger.error("Path is neither a file nor a directory: %s", path)
+        raise typer.Exit(code=5)
 
-        logger.info("Saved %d patches to %s", n_saved, output_dir)
-        return
-
-    # If path is directory, delegate to save_patches_from_folder which supports overwrite
-    if path.is_dir():
-        logger.info("Processing folder: %s", path)
-        try:
-            counts = save_patches_from_folder(
-                input_folder=path,
-                output_folder=output_dir,
-                margin=args.margin,
-                patch_size=args.patch_size,
-                overlap=args.overlap,
-                overwrite=args.overwrite,
-            )
-        except Exception as e:
-            logger.exception("Failed to save patches from folder %s: %s", path, e)
-            sys.exit(4)
-
-        total = sum(counts.values())
-        logger.info(
-            "Saved %d patches for %d files to %s", total, len(counts), output_dir
-        )
-        return
-
-    logger.error("Path is neither a file nor a directory: %s", path)
-    sys.exit(5)
+    app()
 
 
 def main(video_format: VideoFormat = _video_format) -> None:
@@ -374,6 +391,9 @@ class _Config:
     cloud_cover_range: Optional[Tuple[int, int]] = None
     weather_values: Optional[List[str]] = None
     cache_process_filter: bool = False
+    nb_images: Optional[int] = None
+    folder_step: Optional[int] = None
+    first_folder_step: Optional[int] = None
 
 
 def _config_to_dict(config: _Config) -> Dict[str, Any]:
@@ -420,6 +440,12 @@ def _config_to_dict(config: _Config) -> Dict[str, Any]:
         result["weather"] = config.weather_values
 
     result["cache_process"] = config.cache_process_filter
+
+    if config.nb_images is not None:
+        result["nb_images"] = config.nb_images
+
+    if config.folder_step is not None:
+        result["folder_step"] = config.folder_step
 
     return result
 
@@ -483,6 +509,8 @@ def _create_default_config() -> Dict[str, Any]:
         cloud_cover_range=(0, 30),
         weather_values=["clear", "partly_cloudy"],
         cache_process_filter=False,
+        nb_images=None,
+        folder_step=None,
     )
     # Convert to dictionary for TOML serialization
     return _config_to_dict(config)
@@ -603,6 +631,22 @@ def _parse_config(config: Dict[str, Any]) -> _Config:
     # Optional: cache_process
     cache_process_filter = config.get("cache_process", False)
 
+    # Optional: nb_images
+    nb_images = config.get("nb_images")
+    if nb_images is not None:
+        if not isinstance(nb_images, int):
+            raise ValueError("'nb_images' must be an integer")
+        if nb_images < 0:
+            raise ValueError("'nb_images' must be non-negative")
+
+    # Optional: folder_step
+    folder_step = config.get("folder_step")
+    if folder_step is not None:
+        if not isinstance(folder_step, int):
+            raise ValueError("'folder_step' must be an integer")
+        if folder_step < 1:
+            raise ValueError("'folder_step' must be a positive integer (>= 1)")
+
     return _Config(
         root=root,
         output_dir=output_dir,
@@ -615,6 +659,8 @@ def _parse_config(config: Dict[str, Any]) -> _Config:
         cloud_cover_range=cloud_cover_range,
         weather_values=weather_values,
         cache_process_filter=cache_process_filter,
+        nb_images=nb_images,
+        folder_step=folder_step,
     )
 
 
@@ -676,10 +722,11 @@ def filter_export() -> None:
                     f"Edit this file with your desired filter criteria, then run:\n"
                     f"  nightskycam-filter-export {output_path}"
                 )
-                raise typer.Exit(code=0)
             except Exception as e:
                 typer.echo(f"Error creating configuration file: {e}", err=True)
                 raise typer.Exit(code=1)
+
+            raise typer.Exit(code=0)
 
         # Require config_path if not creating config
         if config_path is None:
@@ -717,6 +764,8 @@ def filter_export() -> None:
                 process_not_substring=parsed.process_not_substring,
                 cloud_cover_range=parsed.cloud_cover_range,
                 weather_values=parsed.weather_values,
+                nb_images=parsed.nb_images,
+                folder_step=parsed.folder_step,
             )
             typer.echo("Filter and export completed successfully!")
         except Exception as e:
@@ -937,80 +986,81 @@ def _remove_from_list(
 
 
 def remove_selected():
-    """
-    CLI entry point for removing selected images from filtered directory.
+    """CLI entry point for removing selected images from filtered directory."""
+    app = typer.Typer(help="Remove selected images from filtered directory")
 
-    Reads a text file with image paths and removes both the image symlinks
-    and their corresponding TOML metadata files from the target directory.
-    """
-    parser = argparse.ArgumentParser(
-        description="Remove selected images from filtered directory"
-    )
-    parser.add_argument(
-        "target_folder",
-        type=str,
-        help="Path to filtered directory containing symlinks",
-    )
-    parser.add_argument(
-        "list_file",
-        type=str,
-        help="Path to text file with images to remove (system/date/filename format)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be removed without actually removing files",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
+    @app.command()
+    def run(
+        target_folder: Path = typer.Argument(
+            ...,
+            help="Path to filtered directory containing symlinks",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        list_file: Path = typer.Argument(
+            ...,
+            help="Path to text file with images to remove (system/date/filename format)",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Show what would be removed without actually removing files",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose logging",
+        ),
+    ) -> None:
+        """Remove selected images from filtered directory.
 
-    args = parser.parse_args()
-
-    # Configure logging
-    if args.verbose:
+        Reads a text file with image paths and removes both the image symlinks
+        and their corresponding TOML metadata files from the target directory.
+        """
+        # Configure logging
         logger.remove()
-        logger.add(sys.stderr, level="DEBUG")
-    else:
-        logger.remove()
-        logger.add(sys.stderr, level="INFO")
-
-    target_folder = Path(args.target_folder)
-    list_file = Path(args.list_file)
-
-    if args.dry_run:
-        logger.info("=== DRY-RUN MODE ===")
-
-    logger.info(f"Target folder: {target_folder}")
-    logger.info(f"List file: {list_file}")
-
-    try:
-        stats = _remove_from_list(
-            target_folder=target_folder,
-            list_file=list_file,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-        )
-
-        logger.info("=== Removal Statistics ===")
-        logger.info(f"Lines processed: {stats['lines_processed']}")
-        logger.info(f"Images removed: {stats['images_removed']}")
-        logger.info(f"TOML files removed: {stats['tomls_removed']}")
-        logger.info(f"Errors: {stats['errors']}")
-
-        if args.dry_run:
-            logger.info("=== DRY-RUN MODE (no files were actually removed) ===")
-
-        if stats["errors"] > 0:
-            sys.exit(1)
+        if verbose:
+            logger.add(sys.stderr, level="DEBUG")
         else:
-            sys.exit(0)
+            logger.add(sys.stderr, level="INFO")
 
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+        if dry_run:
+            logger.info("=== DRY-RUN MODE ===")
+
+        logger.info(f"Target folder: {target_folder}")
+        logger.info(f"List file: {list_file}")
+
+        try:
+            stats = _remove_from_list(
+                target_folder=target_folder,
+                list_file=list_file,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+
+            logger.info("=== Removal Statistics ===")
+            logger.info(f"Lines processed: {stats['lines_processed']}")
+            logger.info(f"Images removed: {stats['images_removed']}")
+            logger.info(f"TOML files removed: {stats['tomls_removed']}")
+            logger.info(f"Errors: {stats['errors']}")
+
+            if dry_run:
+                logger.info("=== DRY-RUN MODE (no files were actually removed) ===")
+
+            if stats["errors"] > 0:
+                raise typer.Exit(code=1)
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            raise typer.Exit(code=1)
+
+    app()
 
 
 def _get_thumbnail_path_from_image(image_path: Path) -> Path:
@@ -1336,281 +1386,268 @@ def _cleanup_empty_directories(
 
 
 def move_to_backup() -> None:
-    """
-    CLI entry point for moving filtered images to backup.
+    """CLI entry point for moving filtered images to backup."""
+    app = typer.Typer(help="Move original images to backup based on filter-export symlinks")
 
-    Moves original images (and TOMLs) to backup directory based on symlinks
-    in filter-export directory. Deletes thumbnails and cleans up empty folders.
-    """
-    parser = argparse.ArgumentParser(
-        description="Move original images to backup based on filter-export symlinks"
-    )
-    parser.add_argument(
-        "filter_output_dir",
-        type=str,
-        help="Path to filter-export directory containing symlinks",
-    )
-    parser.add_argument(
-        "backup_dir",
-        type=str,
-        help="Path to backup directory (will preserve system/date structure)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview operations without actually moving/deleting files",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
+    @app.command()
+    def run(
+        filter_output_dir: Path = typer.Argument(
+            ...,
+            help="Path to filter-export directory containing symlinks",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        backup_dir: Path = typer.Argument(
+            ...,
+            help="Path to backup directory (will preserve system/date structure)",
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Preview operations without actually moving/deleting files",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose logging",
+        ),
+    ) -> None:
+        """Move original images to backup based on filter-export symlinks.
 
-    args = parser.parse_args()
-
-    # Configure logging
-    if args.verbose:
+        Moves original images (and TOMLs) to backup directory based on symlinks
+        in filter-export directory. Deletes thumbnails and cleans up empty folders.
+        """
+        # Configure logging
         logger.remove()
-        logger.add(sys.stderr, level="DEBUG")
-    else:
-        logger.remove()
-        logger.add(sys.stderr, level="INFO")
+        if verbose:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
 
-    filter_output_dir = Path(args.filter_output_dir)
-    backup_dir = Path(args.backup_dir)
+        if dry_run:
+            logger.info("=== DRY-RUN MODE ===")
 
-    if args.dry_run:
-        logger.info("=== DRY-RUN MODE ===")
+        logger.info(f"Filter-export directory: {filter_output_dir}")
+        logger.info(f"Backup directory: {backup_dir}")
 
-    logger.info(f"Filter-export directory: {filter_output_dir}")
-    logger.info(f"Backup directory: {backup_dir}")
+        try:
+            stats = {
+                "symlinks_processed": 0,
+                "images_moved": 0,
+                "tomls_moved": 0,
+                "thumbnails_deleted": 0,
+            }
 
-    # Validate directories
-    if not filter_output_dir.exists() or not filter_output_dir.is_dir():
-        logger.error(f"Filter-export directory not found: {filter_output_dir}")
-        sys.exit(1)
+            # Track original root directory for cleanup
+            # We'll determine this from the first symlink
+            original_root: Optional[Path] = None
+            processed_originals: Set[Path] = set()  # Track to avoid duplicates
 
-    try:
-        stats = {
-            "symlinks_processed": 0,
-            "images_moved": 0,
-            "tomls_moved": 0,
-            "thumbnails_deleted": 0,
-        }
-
-        # Track original root directory for cleanup
-        # We'll determine this from the first symlink
-        original_root: Optional[Path] = None
-        processed_originals: Set[Path] = set()  # Track to avoid duplicates
-
-        # Walk through filter-export directory
-        for system_dir in filter_output_dir.iterdir():
-            if not system_dir.is_dir():
-                continue
-
-            system_name = system_dir.name
-
-            for date_dir in system_dir.iterdir():
-                if not date_dir.is_dir():
+            # Walk through filter-export directory
+            for system_dir in filter_output_dir.iterdir():
+                if not system_dir.is_dir():
                     continue
 
-                date_name = date_dir.name
+                system_name = system_dir.name
 
-                for item in date_dir.iterdir():
-                    # Only process image symlinks
-                    if not item.is_symlink():
+                for date_dir in system_dir.iterdir():
+                    if not date_dir.is_dir():
                         continue
 
-                    if item.suffix.lstrip(".") not in IMAGE_FILE_FORMATS:
-                        continue
+                    date_name = date_dir.name
 
-                    stats["symlinks_processed"] += 1
-
-                    try:
-                        # Resolve symlink to original file
-                        original_image = item.resolve()
-
-                        # Skip if already processed
-                        if original_image in processed_originals:
-                            logger.debug(f"Already processed: {original_image}")
+                    for item in date_dir.iterdir():
+                        # Only process image symlinks
+                        if not item.is_symlink():
                             continue
 
-                        processed_originals.add(original_image)
+                        if item.suffix.lstrip(".") not in IMAGE_FILE_FORMATS:
+                            continue
 
-                        # Determine original root from first symlink
-                        if original_root is None:
-                            # Original structure: root/system/date/image.ext
-                            # Go up 2 levels from image to get system, then 1 more to get root
-                            original_root = original_image.parent.parent.parent
-                            logger.debug(f"Detected original root: {original_root}")
+                        stats["symlinks_processed"] += 1
 
-                        if args.verbose:
-                            logger.info(f"Processing: {original_image}")
+                        try:
+                            # Resolve symlink to original file
+                            original_image = item.resolve()
 
-                        # Calculate backup destination (preserve tree structure)
-                        relative_path = original_image.relative_to(original_root)
-                        backup_dest = backup_dir / relative_path
+                            # Skip if already processed
+                            if original_image in processed_originals:
+                                logger.debug(f"Already processed: {original_image}")
+                                continue
 
-                        # Move image file
-                        _move_file_safe(original_image, backup_dest, args.dry_run)
-                        stats["images_moved"] += 1
+                            processed_originals.add(original_image)
 
-                        # Move TOML metadata file
-                        original_toml = original_image.with_suffix(".toml")
-                        if original_toml.exists():
-                            backup_toml = backup_dest.with_suffix(".toml")
-                            _move_file_safe(original_toml, backup_toml, args.dry_run)
-                            stats["tomls_moved"] += 1
-                        else:
-                            logger.warning(f"TOML not found: {original_toml}")
+                            # Determine original root from first symlink
+                            if original_root is None:
+                                # Original structure: root/system/date/image.ext
+                                # Go up 2 levels from image to get system, then 1 more to get root
+                                original_root = original_image.parent.parent.parent
+                                logger.debug(f"Detected original root: {original_root}")
 
-                        # Delete thumbnail
-                        thumbnail_path = _get_thumbnail_path_from_image(original_image)
-                        if thumbnail_path.exists():
-                            _delete_path_safe(thumbnail_path, args.dry_run)
-                            stats["thumbnails_deleted"] += 1
+                            if verbose:
+                                logger.info(f"Processing: {original_image}")
 
-                    except Exception as e:
-                        logger.error(f"Error processing {item}: {e}")
-                        raise  # Fail-fast
+                            # Calculate backup destination (preserve tree structure)
+                            relative_path = original_image.relative_to(original_root)
+                            backup_dest = backup_dir / relative_path
 
-        # Cleanup empty directories
-        if original_root is not None:
-            logger.info("Cleaning up empty directories...")
-            cleanup_stats = _cleanup_empty_directories(
-                original_root,
-                dry_run=args.dry_run,
-                verbose=args.verbose,
+                            # Move image file
+                            _move_file_safe(original_image, backup_dest, dry_run)
+                            stats["images_moved"] += 1
+
+                            # Move TOML metadata file
+                            original_toml = original_image.with_suffix(".toml")
+                            if original_toml.exists():
+                                backup_toml = backup_dest.with_suffix(".toml")
+                                _move_file_safe(original_toml, backup_toml, dry_run)
+                                stats["tomls_moved"] += 1
+                            else:
+                                logger.warning(f"TOML not found: {original_toml}")
+
+                            # Delete thumbnail
+                            thumbnail_path = _get_thumbnail_path_from_image(original_image)
+                            if thumbnail_path.exists():
+                                _delete_path_safe(thumbnail_path, dry_run)
+                                stats["thumbnails_deleted"] += 1
+
+                        except Exception as e:
+                            logger.error(f"Error processing {item}: {e}")
+                            raise  # Fail-fast
+
+            # Cleanup empty directories
+            if original_root is not None:
+                logger.info("Cleaning up empty directories...")
+                cleanup_stats = _cleanup_empty_directories(
+                    original_root,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                )
+                stats.update(cleanup_stats)
+            else:
+                logger.warning("No symlinks found, nothing to clean up")
+
+            # Print statistics
+            logger.info("=== Operation Statistics ===")
+            logger.info(f"Symlinks processed: {stats['symlinks_processed']}")
+            logger.info(f"Images moved: {stats['images_moved']}")
+            logger.info(f"TOMLs moved: {stats['tomls_moved']}")
+            logger.info(f"Thumbnails deleted: {stats['thumbnails_deleted']}")
+            logger.info(
+                f"Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
             )
-            stats.update(cleanup_stats)
-        else:
-            logger.warning("No symlinks found, nothing to clean up")
+            logger.info(f"Date folders deleted: {stats.get('date_folders_deleted', 0)}")
+            logger.info(f"System folders deleted: {stats.get('system_folders_deleted', 0)}")
 
-        # Print statistics
-        logger.info("=== Operation Statistics ===")
-        logger.info(f"Symlinks processed: {stats['symlinks_processed']}")
-        logger.info(f"Images moved: {stats['images_moved']}")
-        logger.info(f"TOMLs moved: {stats['tomls_moved']}")
-        logger.info(f"Thumbnails deleted: {stats['thumbnails_deleted']}")
-        logger.info(
-            f"Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
-        )
-        logger.info(f"Date folders deleted: {stats.get('date_folders_deleted', 0)}")
-        logger.info(f"System folders deleted: {stats.get('system_folders_deleted', 0)}")
+            if dry_run:
+                logger.info("=== DRY-RUN MODE (no files were actually moved/deleted) ===")
 
-        if args.dry_run:
-            logger.info("=== DRY-RUN MODE (no files were actually moved/deleted) ===")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            raise typer.Exit(code=1)
 
-        sys.exit(0)
-
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+    app()
 
 
 def move_clear_images_cli():
-    """
-    CLI entry point for moving clear-weather night images.
+    """CLI entry point for moving clear-weather night images."""
+    app = typer.Typer(help="Move clear-weather night images to target directory")
 
-    Moves images with clear weather (22:00-04:00) to target directory.
-    Filters by weather field containing "clear" and time between 22:00-04:00.
-    """
-    parser = argparse.ArgumentParser(
-        description="Move clear-weather night images to target directory"
-    )
-    parser.add_argument(
-        "root_dir",
-        type=Path,
-        help="Source media root directory (nightskycam structure)",
-    )
-    parser.add_argument(
-        "target_dir",
-        type=Path,
-        help="Target directory (will preserve system/date structure)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview moves without actually moving files",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose debug logging",
-    )
+    @app.command()
+    def run(
+        root_dir: Path = typer.Argument(
+            ...,
+            help="Source media root directory (nightskycam structure)",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        target_dir: Path = typer.Argument(
+            ...,
+            help="Target directory (will preserve system/date structure)",
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Preview moves without actually moving files",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose debug logging",
+        ),
+    ) -> None:
+        """Move clear-weather night images to target directory.
 
-    args = parser.parse_args()
+        Moves images with clear weather (22:00-04:00) to target directory.
+        Filters by weather field containing "clear" and time between 22:00-04:00.
+        """
+        # Configure logging
+        logger.remove()
+        if verbose:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
 
-    # Configure logging
-    logger.remove()  # Remove default handler
-    if args.verbose:
-        logger.add(sys.stderr, level="DEBUG")
-    else:
-        logger.add(sys.stderr, level="INFO")
+        try:
+            # Run move operation
+            logger.info("=" * 60)
+            logger.info("nightskycam-move-clear-images")
+            logger.info("=" * 60)
+            logger.info(f"Source: {root_dir}")
+            logger.info(f"Target: {target_dir}")
+            logger.info(f"Filters: weather contains 'clear' AND time 22:00-04:00")
+            logger.info("=" * 60)
 
-    try:
-        # Validate paths
-        if not args.root_dir.exists():
-            logger.error(f"Root directory does not exist: {args.root_dir}")
-            sys.exit(1)
-
-        if not args.root_dir.is_dir():
-            logger.error(f"Root path is not a directory: {args.root_dir}")
-            sys.exit(1)
-
-        # Run move operation
-        logger.info("=" * 60)
-        logger.info("nightskycam-move-clear-images")
-        logger.info("=" * 60)
-        logger.info(f"Source: {args.root_dir}")
-        logger.info(f"Target: {args.target_dir}")
-        logger.info(f"Filters: weather contains 'clear' AND time 22:00-04:00")
-        logger.info("=" * 60)
-
-        stats = move_clear_images(
-            root=args.root_dir,
-            target_dir=args.target_dir,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-        )
-
-        # Display statistics
-        logger.info("=" * 60)
-        logger.info("Operation Statistics")
-        logger.info("=" * 60)
-        logger.info(f"Images scanned: {stats['images_scanned']}")
-        logger.info(f"Images matched: {stats['images_matched']}")
-        logger.info(f"Images moved: {stats['images_moved']}")
-        logger.info(f"TOMLs moved: {stats['tomls_moved']}")
-        logger.info(f"Images skipped (already exist): {stats['images_skipped']}")
-        logger.info(f"Errors: {stats['errors']}")
-
-        if not args.dry_run:
-            logger.info("")
-            logger.info("Empty directories cleaned up:")
-            logger.info(
-                f"  Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
-            )
-            logger.info(
-                f"  Date folders deleted: {stats.get('date_folders_deleted', 0)}"
-            )
-            logger.info(
-                f"  System folders deleted: {stats.get('system_folders_deleted', 0)}"
+            stats = move_clear_images(
+                root=root_dir,
+                target_dir=target_dir,
+                dry_run=dry_run,
+                verbose=verbose,
             )
 
-        if args.dry_run:
-            logger.info("")
-            logger.info("=== DRY-RUN MODE (no files were actually moved) ===")
+            # Display statistics
+            logger.info("=" * 60)
+            logger.info("Operation Statistics")
+            logger.info("=" * 60)
+            logger.info(f"Images scanned: {stats['images_scanned']}")
+            logger.info(f"Images matched: {stats['images_matched']}")
+            logger.info(f"Images moved: {stats['images_moved']}")
+            logger.info(f"TOMLs moved: {stats['tomls_moved']}")
+            logger.info(f"Images skipped (already exist): {stats['images_skipped']}")
+            logger.info(f"Errors: {stats['errors']}")
 
-        logger.info("=" * 60)
-        logger.info("Operation completed successfully!")
-        sys.exit(0)
+            if not dry_run:
+                logger.info("")
+                logger.info("Empty directories cleaned up:")
+                logger.info(
+                    f"  Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
+                )
+                logger.info(
+                    f"  Date folders deleted: {stats.get('date_folders_deleted', 0)}"
+                )
+                logger.info(
+                    f"  System folders deleted: {stats.get('system_folders_deleted', 0)}"
+                )
 
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        if args.verbose:
-            traceback.print_exc()
-        sys.exit(1)
+            if dry_run:
+                logger.info("")
+                logger.info("=== DRY-RUN MODE (no files were actually moved) ===")
+
+            logger.info("=" * 60)
+            logger.info("Operation completed successfully!")
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if verbose:
+                traceback.print_exc()
+            raise typer.Exit(code=1)
+
+    app()
 
 
 def _get_default_scorer_config() -> Dict[str, Any]:
@@ -2091,105 +2128,90 @@ def copy_thumbnails() -> None:
 
 
 def create_missing_thumbnails_cli() -> None:
-    """
-    CLI entry point for creating missing thumbnails.
+    """CLI entry point for creating missing thumbnails."""
+    app = typer.Typer(help="Create thumbnails for images that are missing them")
 
-    Creates thumbnails only for images that don't already have them.
-    """
-    parser = argparse.ArgumentParser(
-        description="Create thumbnails for images that are missing them"
-    )
-    parser.add_argument(
-        "root_dir",
-        type=Path,
-        help="Root directory with nightskycam structure (system/date/)",
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=200,
-        help="Width of thumbnails in pixels (default: 200)",
-    )
-    parser.add_argument(
-        "--stretch",
-        action="store_true",
-        default=True,
-        help="Apply auto-stretch to images (default: True)",
-    )
-    parser.add_argument(
-        "--no-stretch",
-        dest="stretch",
-        action="store_false",
-        help="Disable auto-stretch",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview what would be created without actually creating thumbnails",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
+    @app.command()
+    def run(
+        root_dir: Path = typer.Argument(
+            ...,
+            help="Root directory with nightskycam structure (system/date/)",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        width: int = typer.Option(
+            200,
+            "--width",
+            help="Width of thumbnails in pixels",
+        ),
+        stretch: bool = typer.Option(
+            True,
+            "--stretch/--no-stretch",
+            help="Apply auto-stretch to images",
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Preview what would be created without actually creating thumbnails",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose logging",
+        ),
+    ) -> None:
+        """Create thumbnails for images that are missing them.
 
-    args = parser.parse_args()
-
-    # Configure logging
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
-
-    try:
-        # Validate path
-        if not args.root_dir.exists():
-            logger.error(f"Root directory does not exist: {args.root_dir}")
-            sys.exit(1)
-
-        if not args.root_dir.is_dir():
-            logger.error(f"Root path is not a directory: {args.root_dir}")
-            sys.exit(1)
-
-        # Import the function
-        logger.info("=" * 60)
-        logger.info("nightskycam-create-missing-thumbnails")
-        logger.info("=" * 60)
-        logger.info(f"Root directory: {args.root_dir}")
-        logger.info(f"Thumbnail width: {args.width} pixels")
-        logger.info(f"Auto-stretch: {args.stretch}")
-        if args.dry_run:
-            logger.info("DRY-RUN MODE: No thumbnails will be created")
-        logger.info("=" * 60)
-
-        # Run the function
-        stats = create_missing_thumbnails(
-            root_dir=args.root_dir,
-            thumbnail_width=args.width,
-            stretch=args.stretch,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
+        Creates thumbnails only for images that don't already have them.
+        """
+        # Configure logging
+        logging.basicConfig(
+            level=logging.DEBUG if verbose else logging.INFO,
+            format="%(levelname)s: %(message)s",
         )
 
-        # Display statistics
-        logger.info("=" * 60)
-        logger.info("Operation Statistics")
-        logger.info("=" * 60)
-        logger.info(f"Images scanned: {stats['images_scanned']}")
-        logger.info(f"Thumbnails missing: {stats['thumbnails_missing']}")
-        logger.info(f"Thumbnails created: {stats['thumbnails_created']}")
-        logger.info(f"Errors: {stats['errors']}")
+        try:
+            logger.info("=" * 60)
+            logger.info("nightskycam-create-missing-thumbnails")
+            logger.info("=" * 60)
+            logger.info(f"Root directory: {root_dir}")
+            logger.info(f"Thumbnail width: {width} pixels")
+            logger.info(f"Auto-stretch: {stretch}")
+            if dry_run:
+                logger.info("DRY-RUN MODE: No thumbnails will be created")
+            logger.info("=" * 60)
 
-        if args.dry_run:
-            logger.info("")
-            logger.info("=== DRY-RUN MODE (no thumbnails were actually created) ===")
+            # Run the function
+            stats = create_missing_thumbnails(
+                root_dir=root_dir,
+                thumbnail_width=width,
+                stretch=stretch,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
 
-        logger.info("=" * 60)
-        logger.info("Operation completed successfully!")
-        sys.exit(0)
+            # Display statistics
+            logger.info("=" * 60)
+            logger.info("Operation Statistics")
+            logger.info("=" * 60)
+            logger.info(f"Images scanned: {stats['images_scanned']}")
+            logger.info(f"Thumbnails missing: {stats['thumbnails_missing']}")
+            logger.info(f"Thumbnails created: {stats['thumbnails_created']}")
+            logger.info(f"Errors: {stats['errors']}")
 
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        if args.verbose:
-            traceback.print_exc()
-        sys.exit(1)
+            if dry_run:
+                logger.info("")
+                logger.info("=== DRY-RUN MODE (no thumbnails were actually created) ===")
+
+            logger.info("=" * 60)
+            logger.info("Operation completed successfully!")
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if verbose:
+                traceback.print_exc()
+            raise typer.Exit(code=1)
+
+    app()
