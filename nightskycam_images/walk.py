@@ -959,7 +959,7 @@ def filter_and_export_images(
     cloud_cover_range
         Tuple of (min_cover, max_cover) for cloud cover filtering.
     weather_values
-        Weather value(s) to match.
+        Weather substring(s) to match. Uses substring matching (e.g., "rain" matches "rain", "light rain", "heavy rain").
     nb_images
         If a positive integer, only create symlinks for a maximum of nb_images
         randomly selected from the images that pass the filter. If None or 0,

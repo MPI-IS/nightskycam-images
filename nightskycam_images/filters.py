@@ -280,7 +280,7 @@ def has_weather_value(
     default: bool = False,
 ) -> bool:
     """
-    Check if 'weather' field matches a specified value or is in a set of values.
+    Check if 'weather' field contains a specified substring or any substring from a set.
 
     Parameters
     ----------
@@ -289,14 +289,14 @@ def has_weather_value(
     toml_path
         Path to the TOML metadata file.
     weather
-        Weather value(s) to match. Can be:
-        - A single string for exact match (case-sensitive)
-        - A container of strings (list, tuple, set) for matching any value
+        Weather substring(s) to match. Can be:
+        - A single string for substring match (case-sensitive)
+        - A container of strings (list, tuple, set) for matching any substring
 
     Returns
     -------
     bool
-        True if the weather field matches the specified value (or any value in container).
+        True if the weather field contains the specified substring (or any substring in container).
     """
     if toml_path is None or not toml_path.exists():
         logger.debug(f"TOML file not found for {image_path.name}, skipping")
@@ -319,10 +319,11 @@ def has_weather_value(
 
         # Check if weather is a string or a container
         if isinstance(weather, str):
-            return weather_value == weather
+            # Single substring: check if it's in the weather value
+            return weather in weather_value
         else:
-            # Assume it's a container (list, tuple, set, etc.)
-            return weather_value in weather
+            # Container of substrings: check if any substring matches
+            return any(substring in weather_value for substring in weather)
 
     except toml.decoder.TomlDecodeError as e:
         logger.error(f"Failed to parse TOML file {toml_path.name}: {e}")
@@ -355,7 +356,8 @@ def create_combined_predicate(
         Tuple of (min_cover, max_cover) for cloud cover filtering.
         None means no filtering on cloud cover.
     weather_values
-        Weather value(s) to match. Can be a single string or container of strings.
+        Weather substring(s) to match. Can be a single string or container of strings.
+        Uses substring matching (e.g., "rain" matches "rain", "light rain", "heavy rain").
         None means no filtering on weather.
 
     Returns
