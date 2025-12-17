@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nightskycam Symlink Annotator</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            padding-bottom: 2rem;
+        }
+
+        .navbar {
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .count-badge {
+            font-size: 1.1rem;
+            padding: 0.5rem 1rem;
+        }
+
+        .thumbnail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .thumbnail-card {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            transition: transform 0.3s, box-shadow 0.3s;
+            position: relative;
+        }
+
+        .thumbnail-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        .thumbnail-card img {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            display: block;
+        }
+
+        .classification-buttons {
+            display: flex;
+            width: 100%;
+        }
+
+        .classification-buttons .btn {
+            flex: 1;
+            border-radius: 0;
+            font-weight: 600;
+            padding: 0.75rem;
+        }
+
+        .classified-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            font-size: 0.9rem;
+            padding: 0.4rem 0.8rem;
+            z-index: 10;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .timestamp {
+            padding: 0.5rem;
+            font-size: 0.85rem;
+            color: #6c757d;
+            text-align: center;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .loading-spinner {
+            text-align: center;
+            padding: 3rem;
+            display: none;
+        }
+
+        .loading-spinner.show {
+            display: block;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #6c757d;
+            display: none;
+        }
+
+        .empty-state.show {
+            display: block;
+        }
+
+        .image-count {
+            font-size: 0.95rem;
+            color: #495057;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a href="/" class="navbar-brand mb-0 h1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-stars me-2" viewBox="0 0 16 16">
+                    <path d="M7.657 6.247c.11-.33.576-.33.686 0l.645 1.937a2.89 2.89 0 0 0 1.829 1.828l1.936.645c.33.11.33.576 0 .686l-1.937.645a2.89 2.89 0 0 0-1.828 1.829l-.645 1.936a.361.361 0 0 1-.686 0l-.645-1.937a2.89 2.89 0 0 0-1.828-1.828l-1.937-.645a.361.361 0 0 1 0-.686l1.937-.645a2.89 2.89 0 0 0 1.828-1.828l.645-1.937zM3.794 1.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387A1.734 1.734 0 0 0 4.593 5.69l-.387 1.162a.217.217 0 0 1-.412 0L3.407 5.69A1.734 1.734 0 0 0 2.31 4.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387A1.734 1.734 0 0 0 3.407 2.31l.387-1.162zM10.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.156 1.156 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.156 1.156 0 0 0-.732-.732L9.1 2.137a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732L10.863.1z"/>
+                </svg>
+                Nightskycam Symlink Annotator
+            </a>
+            <div class="d-flex gap-3">
+                <span class="count-badge badge bg-success" title="Positive classifications">
+                    + <span id="positiveCount">0</span>
+                </span>
+                <span class="count-badge badge bg-danger" title="Negative classifications">
+                    - <span id="negativeCount">0</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container">
+        <!-- Filter Controls -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <label for="systemSelect" class="form-label fw-bold">System</label>
+                <select class="form-select form-select-lg" id="systemSelect">
+                    <option selected disabled>Select a system...</option>
+                </select>
+            </div>
+            <div class="col-md-6">
+                <label for="dateSelect" class="form-label fw-bold">Date</label>
+                <select class="form-select form-select-lg" id="dateSelect" disabled>
+                    <option selected disabled>Select a date...</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Image Count -->
+        <div id="imageCount" class="mb-3 d-none">
+            <div class="image-count">
+                <strong>Images:</strong> <span id="imageCountNumber">0</span>
+            </div>
+        </div>
+
+        <!-- Loading Spinner -->
+        <div class="loading-spinner" id="loadingSpinner">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2 text-muted">Loading images...</p>
+        </div>
+
+        <!-- Empty State -->
+        <div class="empty-state" id="emptyState">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-images mb-3" viewBox="0 0 16 16">
+                <path d="M4.502 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/>
+                <path d="M14.002 13a2 2 0 0 1-2 2h-10a2 2 0 0 1-2-2V5A2 2 0 0 1 2 3a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-1.998 2zM14 2H4a1 1 0 0 0-1 1h9.002a2 2 0 0 1 2 2v7A1 1 0 0 0 15 11V3a1 1 0 0 0-1-1zM2.002 4a1 1 0 0 0-1 1v8l2.646-2.354a.5.5 0 0 1 .63-.062l2.66 1.773 3.71-3.71a.5.5 0 0 1 .577-.094l1.777 1.947V5a1 1 0 0 0-1-1h-10z"/>
+            </svg>
+            <p>No images found. Select a system and date to begin.</p>
+        </div>
+
+        <!-- Thumbnail Grid -->
+        <div id="thumbnailGrid" class="thumbnail-grid"></div>
+    </div>
+
+    <script>
+        // State
+        let currentSystem = null;
+        let currentDate = null;
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSystems();
+            updateCounts();
+        });
+
+        // Load available systems
+        async function loadSystems() {
+            try {
+                const response = await fetch('/api/systems');
+                const systems = await response.json();
+
+                const systemSelect = document.getElementById('systemSelect');
+                systemSelect.innerHTML = '<option selected disabled>Select a system...</option>';
+
+                systems.forEach(system => {
+                    const option = document.createElement('option');
+                    option.value = system;
+                    option.textContent = system;
+                    systemSelect.appendChild(option);
+                });
+
+                // Add change event listener
+                systemSelect.addEventListener('change', (e) => {
+                    const system = e.target.value;
+                    currentSystem = system;
+                    loadDates(system);
+                });
+
+            } catch (error) {
+                console.error('Error loading systems:', error);
+                alert('Error loading systems: ' + error.message);
+            }
+        }
+
+        // Load dates for selected system
+        async function loadDates(system) {
+            try {
+                const response = await fetch(`/api/dates/${system}`);
+                const dates = await response.json();
+
+                const dateSelect = document.getElementById('dateSelect');
+                dateSelect.innerHTML = '<option selected disabled>Select a date...</option>';
+                dateSelect.disabled = false;
+
+                dates.forEach(date => {
+                    const option = document.createElement('option');
+                    option.value = date.value;
+                    option.textContent = date.display;
+                    dateSelect.appendChild(option);
+                });
+
+                // Clear previous images
+                document.getElementById('thumbnailGrid').innerHTML = '';
+                document.getElementById('imageCount').classList.add('d-none');
+                document.getElementById('emptyState').classList.remove('show');
+
+                // Add change event listener
+                dateSelect.addEventListener('change', (e) => {
+                    const date = e.target.value;
+                    currentDate = date;
+                    loadImages(currentSystem, date);
+                });
+
+            } catch (error) {
+                console.error('Error loading dates:', error);
+                alert('Error loading dates: ' + error.message);
+            }
+        }
+
+        // Load images for selected system/date
+        async function loadImages(system, date) {
+            try {
+                // Show loading spinner
+                document.getElementById('loadingSpinner').classList.add('show');
+                document.getElementById('emptyState').classList.remove('show');
+                document.getElementById('thumbnailGrid').innerHTML = '';
+                document.getElementById('imageCount').classList.add('d-none');
+
+                const response = await fetch(`/api/images/${system}/${date}`);
+                const images = await response.json();
+
+                // Hide loading spinner
+                document.getElementById('loadingSpinner').classList.remove('show');
+
+                if (images.length === 0) {
+                    document.getElementById('emptyState').classList.add('show');
+                    return;
+                }
+
+                // Show image count
+                document.getElementById('imageCountNumber').textContent = images.length;
+                document.getElementById('imageCount').classList.remove('d-none');
+
+                // Check classification status for all images (in parallel)
+                const classificationChecks = images.map(async (image) => {
+                    try {
+                        const response = await fetch(`/api/check-classification/${image.filename}`);
+                        const data = await response.json();
+                        image.classification = data.classification;
+                    } catch (error) {
+                        console.error(`Error checking classification for ${image.filename}:`, error);
+                        image.classification = null;
+                    }
+                    return image;
+                });
+
+                const imagesWithClassification = await Promise.all(classificationChecks);
+
+                // Create thumbnail cards
+                const grid = document.getElementById('thumbnailGrid');
+                imagesWithClassification.forEach(image => {
+                    const card = createThumbnailCard(image, system, date);
+                    grid.appendChild(card);
+                });
+
+            } catch (error) {
+                console.error('Error loading images:', error);
+                document.getElementById('loadingSpinner').classList.remove('show');
+                document.getElementById('emptyState').classList.add('show');
+                alert('Error loading images: ' + error.message);
+            }
+        }
+
+        // Create thumbnail card element
+        function createThumbnailCard(image, system, date) {
+            const card = document.createElement('div');
+            card.className = 'thumbnail-card';
+
+            // Add classification badge if already classified
+            let badgeHtml = '';
+            if (image.classification === 'positive') {
+                badgeHtml = '<span class="classified-badge badge bg-success">+ Positive</span>';
+            } else if (image.classification === 'negative') {
+                badgeHtml = '<span class="classified-badge badge bg-danger">- Negative</span>';
+            }
+
+            card.innerHTML = `
+                ${badgeHtml}
+                <img src="${image.thumbnail_url}" alt="${image.filename}" loading="lazy">
+                <div class="timestamp">${image.timestamp}</div>
+                <div class="classification-buttons">
+                    <button class="btn btn-success classify-btn"
+                            data-system="${system}"
+                            data-date="${date}"
+                            data-filename="${image.filename}"
+                            data-classification="positive">
+                        + Positive
+                    </button>
+                    <button class="btn btn-danger classify-btn"
+                            data-system="${system}"
+                            data-date="${date}"
+                            data-filename="${image.filename}"
+                            data-classification="negative">
+                        - Negative
+                    </button>
+                </div>
+            `;
+
+            // Add click handlers to buttons
+            const buttons = card.querySelectorAll('.classify-btn');
+            buttons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const system = button.dataset.system;
+                    const date = button.dataset.date;
+                    const filename = button.dataset.filename;
+                    const classification = button.dataset.classification;
+                    classifyImage(system, date, filename, classification, card);
+                });
+            });
+
+            return card;
+        }
+
+        // Classify an image
+        async function classifyImage(system, date, filename, classification, card) {
+            try {
+                const response = await fetch('/api/classify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        system: system,
+                        date: date,
+                        filename: filename,
+                        classification: classification,
+                    }),
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // Update counts in navbar
+                    document.getElementById('positiveCount').textContent = result.counts.positive;
+                    document.getElementById('negativeCount').textContent = result.counts.negative;
+
+                    // Remove old badge
+                    const oldBadge = card.querySelector('.classified-badge');
+                    if (oldBadge) {
+                        oldBadge.remove();
+                    }
+
+                    // Add new classification badge
+                    const badge = document.createElement('span');
+                    badge.className = 'classified-badge badge';
+                    if (classification === 'positive') {
+                        badge.className += ' bg-success';
+                        badge.textContent = '+ Positive';
+                    } else {
+                        badge.className += ' bg-danger';
+                        badge.textContent = '- Negative';
+                    }
+                    card.insertBefore(badge, card.firstChild);
+
+                    // Visual feedback: scale animation
+                    card.style.transform = 'scale(1.05)';
+                    setTimeout(() => {
+                        card.style.transform = '';
+                    }, 300);
+
+                } else {
+                    alert('Error: ' + result.error);
+                }
+
+            } catch (error) {
+                console.error('Error classifying image:', error);
+                alert('Error classifying image: ' + error.message);
+            }
+        }
+
+        // Update counts
+        async function updateCounts() {
+            try {
+                const response = await fetch('/api/counts');
+                const counts = await response.json();
+                document.getElementById('positiveCount').textContent = counts.positive;
+                document.getElementById('negativeCount').textContent = counts.negative;
+            } catch (error) {
+                console.error('Error updating counts:', error);
+            }
+        }
+    </script>
+</body>
+</html>

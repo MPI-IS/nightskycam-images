@@ -40,8 +40,10 @@ nightskycam-move-to-backup = 'nightskycam_images.main:move_to_backup'
 nightskycam-move-clear-images = 'nightskycam_images.main:move_clear_images_cli'
 nightskycam-scorer-filter = 'nightskycam_images.main:scorer_filter'
 nightskycam-copy-thumbnails = 'nightskycam_images.main:copy_thumbnails'
+nightskycam-check-thumbnails = 'nightskycam_images.main:check_thumbnails'
 nightskycam-create-missing-thumbnails = 'nightskycam_images.main:create_missing_thumbnails_cli'
 nightskycam-save-patches = 'nightskycam_images.main:save_patches'
+nightskycam-symlink-annotator-webapp = 'nightskycam_images.main:symlink_annotator_webapp'
 
 [build-system]
 requires = ["poetry-core"]

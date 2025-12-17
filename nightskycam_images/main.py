@@ -22,11 +22,12 @@ from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME
 from .convert_npy import to_npy
 from .patches import load_image_and_extract_patches, save_patches_from_folder
 from .stats import generate_stats_report
-from .thumbnail import create_missing_thumbnails
+from .thumbnail import create_missing_thumbnails, _thumbnail_path
 from .video import VideoFormat, create_video
 from .view_webapp import create_app as create_view_app
 from .walk import (
     _create_symlink_safe,
+    _get_images_from_hd,
     _is_within_date_range,
     copy_and_retarget_symlinks,
     filter_and_export_images,
@@ -505,12 +506,12 @@ def _create_default_config() -> Dict[str, Any]:
         end_date=dt.date(2025, 12, 31),
         time_window=(dt.time(20, 0), dt.time(23, 0)),
         process_substring="stretching and 8bits",
-        process_not_substring=None,
+        process_not_substring="bad_substring",
         cloud_cover_range=(0, 30),
         weather_values=["clear", "partly_cloudy"],
         cache_process_filter=False,
-        nb_images=None,
-        folder_step=None,
+        nb_images=1000,
+        folder_step=2,
     )
     # Convert to dictionary for TOML serialization
     return _config_to_dict(config)
@@ -2213,5 +2214,176 @@ def create_missing_thumbnails_cli() -> None:
             if verbose:
                 traceback.print_exc()
             raise typer.Exit(code=1)
+
+    app()
+
+
+def check_thumbnails():
+    """CLI entry point for checking thumbnail completeness."""
+    app = typer.Typer(help="Check if all full images have related thumbnails")
+
+    @app.command()
+    def run(
+        root_dir: Path = typer.Argument(
+            ...,
+            help="Root directory with nightskycam structure (system/date/)",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ) -> None:
+        """Check if all full images have related thumbnails."""
+        # Initialize data structure
+        missing_by_folder: Dict[Path, List[Path]] = {}
+        total_images = 0
+        total_folders = 0
+
+        # Walk directory structure
+        for system_path in walk_systems(root_dir):
+            for date, date_path in walk_dates(system_path):
+                total_folders += 1
+
+                # Show progress
+                rel_path = date_path.relative_to(root_dir)
+                typer.echo(f"Checking: {rel_path}")
+
+                # Get all HD images in this date folder
+                images = _get_images_from_hd(date_path)
+                total_images += len(images)
+
+                # Check each image for missing thumbnail
+                missing_in_folder = []
+                for image in images:
+                    # Get HD image path
+                    hd_path = image.hd
+                    if hd_path is None:
+                        continue
+
+                    # Check if thumbnail exists
+                    thumbnail_path = _thumbnail_path(hd_path)
+                    if not thumbnail_path.exists():
+                        missing_in_folder.append(hd_path)
+
+                # Store if any missing
+                if missing_in_folder:
+                    missing_by_folder[date_path] = missing_in_folder
+
+        # Section 1: List folders with missing thumbnails
+        if missing_by_folder:
+            typer.echo("Date folders with missing thumbnails:")
+            for date_path in sorted(missing_by_folder.keys()):
+                # Show relative path from root
+                rel_path = date_path.relative_to(root_dir)
+                typer.echo(f"  {rel_path}")
+
+            typer.echo("")  # Blank line
+
+            # Section 2: Detailed list by folder
+            typer.echo("Missing thumbnails by folder:")
+            typer.echo("")
+            for date_path in sorted(missing_by_folder.keys()):
+                rel_path = date_path.relative_to(root_dir)
+                typer.echo(f"{rel_path}:")
+                for hd_path in missing_by_folder[date_path]:
+                    typer.echo(f"  {hd_path}")
+                typer.echo("")
+
+            # Section 3: Summary statistics
+            total_missing = sum(len(images) for images in missing_by_folder.values())
+            typer.echo("Summary:")
+            typer.echo(f"  Total date folders checked: {total_folders}")
+            typer.echo(f"  Date folders with missing thumbnails: {len(missing_by_folder)}")
+            typer.echo(f"  Total images checked: {total_images}")
+            typer.echo(f"  Total missing thumbnails: {total_missing}")
+        else:
+            typer.echo("All images have thumbnails!")
+
+        # Always exit with code 0
+        raise typer.Exit(code=0)
+
+    app()
+
+
+def symlink_annotator_webapp():
+    """CLI entry point for the symlink annotator web application."""
+    app = typer.Typer(help="Start the Nightskycam symlink annotator web application")
+
+    @app.command()
+    def run(
+        filter_dir: Path = typer.Argument(
+            ...,
+            help="Path to filter-export directory (symlinks)",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        output_dir: Path = typer.Argument(
+            ...,
+            help="Path to output directory (will create positive/negative subdirs)",
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        host: str = typer.Option(
+            "127.0.0.1",
+            "--host",
+            help="Host to bind to",
+        ),
+        port: int = typer.Option(
+            5004,
+            "--port",
+            help="Port to bind to",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug mode",
+        ),
+    ) -> None:
+        """Start the Nightskycam symlink annotator web application."""
+        from .symlink_annotator_webapp import create_app as create_symlink_annotator_app
+
+        # Validate filter_dir has symlink structure
+        has_symlinks = False
+        for system_dir in filter_dir.iterdir():
+            if system_dir.is_dir():
+                for date_dir in system_dir.iterdir():
+                    if date_dir.is_dir():
+                        for item in date_dir.iterdir():
+                            if item.is_symlink():
+                                has_symlinks = True
+                                break
+                        if has_symlinks:
+                            break
+                if has_symlinks:
+                    break
+
+        if not has_symlinks:
+            typer.echo(
+                f"Warning: No symlinks found in {filter_dir}. "
+                "This tool is designed for filter-export directories.",
+                err=True,
+            )
+
+        # Create output directory if needed
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create Flask app
+        flask_app = create_symlink_annotator_app(filter_dir, output_dir)
+
+        typer.echo(f"Starting Nightskycam Symlink Annotator on http://{host}:{port}")
+        typer.echo(f"Filter directory: {filter_dir}")
+        typer.echo(f"Output directory: {output_dir}")
+        typer.echo("  - Positive: {}/positive".format(output_dir))
+        typer.echo("  - Negative: {}/negative".format(output_dir))
+        typer.echo("Press Ctrl+C to stop")
+
+        try:
+            flask_app.run(host=host, port=port, debug=debug)
+        except KeyboardInterrupt:
+            typer.echo("\nShutting down...")
+            raise typer.Exit(code=0)
 
     app()
