@@ -321,7 +321,7 @@ Lines starting with `#` are ignored (comments). Blank lines are skipped.
 
 ### `nightskycam-move-to-backup`
 
-Moves original images to a backup directory based on symlinks in a filter-export directory. Deletes thumbnails and cleans up empty folders.
+Moves original images to a backup directory based on symlinks in a filter-export directory. Moves thumbnails and cleans up empty folders.
 
 **Usage:**
 ```bash
@@ -343,12 +343,73 @@ nightskycam-move-to-backup /path/to/filter_output /path/to/backup --verbose
 1. Follows each symlink to find the original image file
 2. Moves the original image to backup directory
 3. Moves the corresponding `.toml` metadata file
-4. Deletes the corresponding thumbnail
+4. Moves the corresponding thumbnail to backup (preserving system/date/thumbnails structure)
 5. Cleans up empty directories (thumbnail folders, date folders, system folders)
 
-**Output:** Statistics showing symlinks processed, images/TOMLs moved, thumbnails deleted, and folders cleaned up.
+**Output:** Statistics showing symlinks processed, images/TOMLs/thumbnails moved, and folders cleaned up.
 
 **Use case:** Archive/backup specific images while removing them from the active collection. For example, moving cloudy images to backup storage to free up space in the main collection.
+
+---
+
+### `nightskycam-delete-from-other`
+
+Deletes images from another root directory based on symlinks in a filter-export directory. This is useful when you have the same images in multiple locations and want to delete them from one location based on a filtered selection.
+
+**Usage:**
+```bash
+# Delete matching images from another root (with confirmation prompt)
+nightskycam-delete-from-other /path/to/filter_output /path/to/other_root
+
+# Dry-run mode (preview without deleting)
+nightskycam-delete-from-other /path/to/filter_output /path/to/other_root --dry-run
+
+# Skip confirmation prompt (use with caution!)
+nightskycam-delete-from-other /path/to/filter_output /path/to/other_root --yes
+
+# Verbose logging
+nightskycam-delete-from-other /path/to/filter_output /path/to/other_root --verbose
+```
+
+**Arguments:**
+- `filter_output_dir`: Directory containing symlinks (from `nightskycam-filter-export`)
+- `other_root_dir`: Root directory from which to delete matching images
+
+**What it does:**
+1. Walks through the filter-export directory (symlinks)
+2. For each symlink, extracts the relative path (system/date/filename)
+3. Looks for the corresponding file in `other_root_dir`
+4. If found, deletes the image, `.toml` metadata file, and thumbnail from `other_root_dir`
+5. Cleans up empty directories (thumbnail folders, date folders, system folders) in `other_root_dir`
+6. **IMPORTANT**: Only deletes files from `other_root_dir`, NEVER the symlinks themselves
+
+**Safety features:**
+- Shows a preview of files to be deleted before proceeding
+- Requires user to type "DELETE" to confirm (unless `--yes` flag is used)
+- Supports `--dry-run` mode to preview without deleting
+- Fail-fast behavior: stops immediately if any error occurs
+- Warns prominently that operation is destructive and cannot be undone
+
+**Output:** Statistics showing symlinks processed, images/TOMLs/thumbnails deleted from other root, images not found, and folders cleaned up.
+
+**Use case:** You have images stored in two locations (e.g., local SSD and network storage). You filter images on the local SSD using `nightskycam-filter-export`, then want to delete those same filtered images from the network storage to free up space. This command looks up the corresponding files in the network storage and deletes them, without touching your local filtered symlinks.
+
+**Example workflow:**
+```bash
+# Step 1: Filter cloudy images on local SSD
+nightskycam-filter-export config_cloudy.toml
+# (creates symlinks in /filtered/cloudy/ pointing to /local/ssd/images/)
+
+# Step 2: Preview deletion from network storage
+nightskycam-delete-from-other /filtered/cloudy/ /network/storage/images/ --dry-run
+
+# Step 3: Delete from network storage (asks for confirmation)
+nightskycam-delete-from-other /filtered/cloudy/ /network/storage/images/
+# Type "DELETE" when prompted
+
+# Result: Cloudy images are deleted from /network/storage/images/
+#         Your /filtered/cloudy/ symlinks and /local/ssd/images/ remain untouched
+```
 
 ---
 
