@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import imageio.v3 as iio
 from loguru import logger
+import numpy as np
 import tomli
 import tomli_w
 import typer
@@ -18,7 +19,7 @@ from nightskycam_scorer.model.infer import SkyScorer
 from nightskycam_scorer.utils import to_float_image
 
 from .annotator_webapp import create_app as create_annotator_app
-from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME
+from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME, VIDEO_FILE_NAME
 from .convert_npy import to_npy
 from .patches import load_image_and_extract_patches, save_patches_from_folder
 from .stats import generate_stats_report
@@ -463,6 +464,28 @@ class _ScorerConfig:
     end_date: Optional[dt.date] = None
     classify_positive: bool = True
     probability_threshold: float = 0.5
+
+
+@dataclass
+class _ModelConfig:
+    """Configuration for a single model in the classifier."""
+
+    model_path: Path
+    probability_threshold: float
+    classify_positive: bool
+
+
+@dataclass
+class _ClassifierConfig:
+    """Configuration for multi-model classification."""
+
+    root: Path
+    filtered_dir: Path
+    not_filtered_dir: Path
+    models: List[_ModelConfig]
+    systems: Optional[List[str]] = None
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
 
 
 def _scorer_config_to_dict(config: _ScorerConfig) -> Dict[str, Any]:
@@ -1418,8 +1441,8 @@ def move_to_backup() -> None:
     ) -> None:
         """Move original images to backup based on filter-export symlinks.
 
-        Moves original images (and TOMLs) to backup directory based on symlinks
-        in filter-export directory. Deletes thumbnails and cleans up empty folders.
+        Moves original images, TOMLs, and thumbnails to backup directory based on symlinks
+        in filter-export directory. Preserves system/date/thumbnails structure and cleans up empty folders.
         """
         # Configure logging
         logger.remove()
@@ -1439,7 +1462,7 @@ def move_to_backup() -> None:
                 "symlinks_processed": 0,
                 "images_moved": 0,
                 "tomls_moved": 0,
-                "thumbnails_deleted": 0,
+                "thumbnails_moved": 0,
             }
 
             # Track original root directory for cleanup
@@ -1508,11 +1531,14 @@ def move_to_backup() -> None:
                             else:
                                 logger.warning(f"TOML not found: {original_toml}")
 
-                            # Delete thumbnail
+                            # Move thumbnail
                             thumbnail_path = _get_thumbnail_path_from_image(original_image)
                             if thumbnail_path.exists():
-                                _delete_path_safe(thumbnail_path, dry_run)
-                                stats["thumbnails_deleted"] += 1
+                                # Calculate backup destination for thumbnail preserving structure
+                                relative_thumbnail_path = thumbnail_path.relative_to(original_root)
+                                backup_thumbnail = backup_dir / relative_thumbnail_path
+                                _move_file_safe(thumbnail_path, backup_thumbnail, dry_run)
+                                stats["thumbnails_moved"] += 1
 
                         except Exception as e:
                             logger.error(f"Error processing {item}: {e}")
@@ -1535,7 +1561,7 @@ def move_to_backup() -> None:
             logger.info(f"Symlinks processed: {stats['symlinks_processed']}")
             logger.info(f"Images moved: {stats['images_moved']}")
             logger.info(f"TOMLs moved: {stats['tomls_moved']}")
-            logger.info(f"Thumbnails deleted: {stats['thumbnails_deleted']}")
+            logger.info(f"Thumbnails moved: {stats['thumbnails_moved']}")
             logger.info(
                 f"Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
             )
@@ -1550,6 +1576,340 @@ def move_to_backup() -> None:
             raise typer.Exit(code=1)
 
     app()
+
+
+def delete_from_other_root() -> None:
+    """CLI entry point for deleting images from another root based on filter-export symlinks."""
+    app = typer.Typer(
+        help="Delete images from another root directory based on filter-export symlinks"
+    )
+
+    @app.command()
+    def run(
+        filter_output_dir: Path = typer.Argument(
+            ...,
+            help="Path to filter-export directory containing symlinks",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        other_root_dir: Path = typer.Argument(
+            ...,
+            help="Path to other root directory from which to delete matching images",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Preview operations without actually deleting files",
+        ),
+        verbose: bool = typer.Option(
+            False,
+            "--verbose",
+            help="Enable verbose logging",
+        ),
+        yes: bool = typer.Option(
+            False,
+            "--yes",
+            "-y",
+            help="Skip confirmation prompt and proceed with deletion",
+        ),
+    ) -> None:
+        """Delete images from another root directory based on filter-export symlinks.
+
+        This command walks through a directory of symlinks (created by nightskycam-filter-export)
+        and deletes corresponding images from a different root directory if they exist.
+
+        IMPORTANT: This ONLY deletes files from 'other_root_dir', never the symlinks themselves.
+
+        For each symlink in filter_output_dir:
+        1. Extracts the relative path (system/date/filename)
+        2. Looks for the corresponding file in other_root_dir
+        3. If found, deletes the image, TOML, and thumbnail from other_root_dir
+        4. Cleans up empty directories in other_root_dir
+
+        WARNING: This operation is destructive and cannot be undone!
+        """
+        # Configure logging
+        logger.remove()
+        if verbose:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
+
+        if dry_run:
+            logger.info("=== DRY-RUN MODE ===")
+
+        logger.info(f"Filter-export directory: {filter_output_dir}")
+        logger.info(f"Other root directory (target for deletion): {other_root_dir}")
+
+        # First pass: count how many files would be affected
+        try:
+            preview_stats = _preview_deletion_from_other_root(
+                filter_output_dir=filter_output_dir,
+                other_root_dir=other_root_dir,
+            )
+
+            # Display preview
+            logger.warning("=" * 70)
+            logger.warning("DELETION PREVIEW")
+            logger.warning("=" * 70)
+            logger.warning(f"Symlinks to process: {preview_stats['symlinks_found']}")
+            logger.warning(
+                f"Images that will be DELETED from {other_root_dir}:"
+            )
+            logger.warning(f"  - HD images: {preview_stats['images_found']}")
+            logger.warning(f"  - TOML files: {preview_stats['tomls_found']}")
+            logger.warning(f"  - Thumbnails: {preview_stats['thumbnails_found']}")
+            logger.warning(
+                f"Images not found in other root: {preview_stats['not_found']}"
+            )
+            logger.warning("=" * 70)
+            logger.warning("WARNING: This operation is DESTRUCTIVE and CANNOT BE UNDONE!")
+            logger.warning("=" * 70)
+
+            # Ask for confirmation unless --yes flag is provided
+            if not yes and not dry_run:
+                response = typer.prompt(
+                    "\nDo you want to proceed with deletion? Type 'DELETE' to confirm",
+                    type=str,
+                )
+                if response != "DELETE":
+                    logger.info("Deletion cancelled by user")
+                    raise typer.Exit(code=0)
+
+            # Proceed with deletion
+            logger.info("Starting deletion process...")
+
+            stats = _delete_images_from_other_root(
+                filter_output_dir=filter_output_dir,
+                other_root_dir=other_root_dir,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+
+            # Print statistics
+            logger.info("=" * 70)
+            logger.info("DELETION STATISTICS")
+            logger.info("=" * 70)
+            logger.info(f"Symlinks processed: {stats['symlinks_processed']}")
+            logger.info(f"Images deleted: {stats['images_deleted']}")
+            logger.info(f"TOMLs deleted: {stats['tomls_deleted']}")
+            logger.info(f"Thumbnails deleted: {stats['thumbnails_deleted']}")
+            logger.info(f"Images not found: {stats['not_found']}")
+            logger.info(
+                f"Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
+            )
+            logger.info(f"Date folders deleted: {stats.get('date_folders_deleted', 0)}")
+            logger.info(
+                f"System folders deleted: {stats.get('system_folders_deleted', 0)}"
+            )
+            logger.info("=" * 70)
+
+            if dry_run:
+                logger.info("=== DRY-RUN MODE (no files were actually deleted) ===")
+            else:
+                logger.info("Deletion completed successfully!")
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            raise typer.Exit(code=1)
+
+    app()
+
+
+def _preview_deletion_from_other_root(
+    filter_output_dir: Path,
+    other_root_dir: Path,
+) -> Dict[str, int]:
+    """
+    Preview what would be deleted from other_root_dir.
+
+    Returns statistics about files that would be affected.
+    """
+    stats = {
+        "symlinks_found": 0,
+        "images_found": 0,
+        "tomls_found": 0,
+        "thumbnails_found": 0,
+        "not_found": 0,
+    }
+
+    processed_files: Set[str] = set()
+
+    # Walk through filter-export directory
+    for system_dir in filter_output_dir.iterdir():
+        if not system_dir.is_dir():
+            continue
+
+        system_name = system_dir.name
+
+        for date_dir in system_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+
+            date_name = date_dir.name
+
+            for item in date_dir.iterdir():
+                # Only process image symlinks
+                if not item.is_symlink():
+                    continue
+
+                if item.suffix.lstrip(".") not in IMAGE_FILE_FORMATS:
+                    continue
+
+                stats["symlinks_found"] += 1
+
+                # Extract relative path structure from symlink location
+                relative_path = f"{system_name}/{date_name}/{item.name}"
+
+                # Skip if already processed (avoid duplicates)
+                if relative_path in processed_files:
+                    continue
+                processed_files.add(relative_path)
+
+                # Construct path in other root
+                other_image_path = other_root_dir / system_name / date_name / item.name
+
+                # Check if image exists
+                if other_image_path.exists():
+                    stats["images_found"] += 1
+
+                    # Check for TOML
+                    other_toml_path = other_image_path.with_suffix(".toml")
+                    if other_toml_path.exists():
+                        stats["tomls_found"] += 1
+
+                    # Check for thumbnail
+                    other_thumbnail_path = _get_thumbnail_path_from_image(other_image_path)
+                    if other_thumbnail_path.exists():
+                        stats["thumbnails_found"] += 1
+                else:
+                    stats["not_found"] += 1
+
+    return stats
+
+
+def _delete_images_from_other_root(
+    filter_output_dir: Path,
+    other_root_dir: Path,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> Dict[str, int]:
+    """
+    Delete images from other_root_dir based on symlinks in filter_output_dir.
+
+    Parameters
+    ----------
+    filter_output_dir
+        Directory containing symlinks (from nightskycam-filter-export).
+    other_root_dir
+        Root directory from which to delete matching images.
+    dry_run
+        If True, don't actually delete files.
+    verbose
+        If True, log detailed progress.
+
+    Returns
+    -------
+    dict
+        Statistics about deletion operations.
+    """
+    stats = {
+        "symlinks_processed": 0,
+        "images_deleted": 0,
+        "tomls_deleted": 0,
+        "thumbnails_deleted": 0,
+        "not_found": 0,
+    }
+
+    processed_files: Set[str] = set()
+
+    # Walk through filter-export directory
+    for system_dir in filter_output_dir.iterdir():
+        if not system_dir.is_dir():
+            continue
+
+        system_name = system_dir.name
+
+        for date_dir in system_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+
+            date_name = date_dir.name
+
+            for item in date_dir.iterdir():
+                # Only process image symlinks
+                if not item.is_symlink():
+                    continue
+
+                if item.suffix.lstrip(".") not in IMAGE_FILE_FORMATS:
+                    continue
+
+                stats["symlinks_processed"] += 1
+
+                try:
+                    # Extract relative path structure from symlink location
+                    relative_path = f"{system_name}/{date_name}/{item.name}"
+
+                    # Skip if already processed (avoid duplicates)
+                    if relative_path in processed_files:
+                        logger.debug(f"Already processed: {relative_path}")
+                        continue
+                    processed_files.add(relative_path)
+
+                    # Construct path in other root
+                    other_image_path = (
+                        other_root_dir / system_name / date_name / item.name
+                    )
+
+                    if verbose:
+                        logger.info(f"Processing: {relative_path}")
+
+                    # Check if image exists in other root
+                    if not other_image_path.exists():
+                        stats["not_found"] += 1
+                        logger.debug(f"Not found in other root: {relative_path}")
+                        continue
+
+                    # Delete image file
+                    _delete_path_safe(other_image_path, dry_run)
+                    stats["images_deleted"] += 1
+
+                    # Delete TOML metadata file
+                    other_toml_path = other_image_path.with_suffix(".toml")
+                    if other_toml_path.exists():
+                        _delete_path_safe(other_toml_path, dry_run)
+                        stats["tomls_deleted"] += 1
+                    else:
+                        logger.debug(f"TOML not found: {other_toml_path}")
+
+                    # Delete thumbnail
+                    other_thumbnail_path = _get_thumbnail_path_from_image(
+                        other_image_path
+                    )
+                    if other_thumbnail_path.exists():
+                        _delete_path_safe(other_thumbnail_path, dry_run)
+                        stats["thumbnails_deleted"] += 1
+
+                except Exception as e:
+                    logger.error(f"Error processing {item}: {e}")
+                    raise  # Fail-fast
+
+    # Cleanup empty directories in other_root_dir
+    logger.info("Cleaning up empty directories in other root...")
+    cleanup_stats = _cleanup_empty_directories(
+        other_root_dir,
+        dry_run=dry_run,
+        verbose=verbose,
+    )
+    stats.update(cleanup_stats)
+
+    return stats
 
 
 def move_clear_images_cli():
@@ -2004,6 +2364,649 @@ def scorer_filter() -> None:
                 logger.warning(f"Errors encountered: {stats['errors']}")
 
             logger.info(f"Output directory: {output_dir}")
+            logger.info("Done!")
+
+            sys.exit(0)
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+
+    app()
+
+
+# ============================================================================
+# Multi-Model Classifier Command
+# ============================================================================
+
+
+class _ModelInferenceEngine:
+    """Wrapper for a loaded model with its configuration."""
+
+    def __init__(
+        self, model_path: Path, threshold: float, classify_positive: bool
+    ) -> None:
+        """
+        Initialize the inference engine with a model and its parameters.
+
+        Parameters
+        ----------
+        model_path
+            Path to the trained model file (.pt)
+        threshold
+            Probability threshold for classification (0.0-1.0)
+        classify_positive
+            If True, classify images with probability >= threshold as positive
+            If False, classify images with probability < threshold as positive
+        """
+        self.scorer = SkyScorer(str(model_path), validate_size=False)
+        self.threshold = threshold
+        self.classify_positive = classify_positive
+        self.model_name = model_path.stem
+
+    def should_filter(self, thumbnail_array: np.ndarray) -> bool:
+        """
+        Run inference and return whether image should be filtered.
+
+        Parameters
+        ----------
+        thumbnail_array
+            Numpy array of thumbnail image
+
+        Returns
+        -------
+        bool
+            True if image should be filtered (matches criteria), False otherwise
+        """
+        rgb_float = to_float_image(thumbnail_array)
+        result_raw = self.scorer.predict(rgb_float)
+        result = result_raw[0] if isinstance(result_raw, list) else result_raw
+
+        if self.classify_positive:
+            return result.probability >= self.threshold
+        else:
+            return result.probability < self.threshold
+
+
+def _copy_image_files(
+    image: Any,
+    output_dir: Path,
+    system_name: str,
+    date_str: str,
+    dry_run: bool = False,
+) -> Tuple[int, int, int]:
+    """
+    Copy HD image, TOML, and thumbnail preserving directory structure.
+
+    Parameters
+    ----------
+    image
+        Image object with .hd, .meta_path, and .thumbnail properties
+    output_dir
+        Base output directory (filtered_dir or not_filtered_dir)
+    system_name
+        Name of the system (e.g., "nightskycam5")
+    date_str
+        Date string in YYYY_MM_DD format
+    dry_run
+        If True, don't actually copy files
+
+    Returns
+    -------
+    tuple
+        (hd_copied, toml_copied, thumbnail_copied) counts (0 or 1 each)
+    """
+    # Create output structure: output_dir/system/date/
+    output_date_dir = output_dir / system_name / date_str
+    output_thumbnail_dir = output_date_dir / THUMBNAIL_DIR_NAME
+
+    if not dry_run:
+        output_date_dir.mkdir(parents=True, exist_ok=True)
+        output_thumbnail_dir.mkdir(parents=True, exist_ok=True)
+
+    counts = [0, 0, 0]
+
+    # Copy HD image
+    if image.hd and image.hd.exists():
+        dest = output_date_dir / image.hd.name
+        if not dest.exists():
+            if not dry_run:
+                shutil.copy2(image.hd, dest)
+            counts[0] = 1
+
+    # Copy TOML metadata
+    if image.meta_path and image.meta_path.exists():
+        dest = output_date_dir / image.meta_path.name
+        if not dest.exists():
+            if not dry_run:
+                shutil.copy2(image.meta_path, dest)
+            counts[1] = 1
+
+    # Copy thumbnail
+    if image.thumbnail and image.thumbnail.exists():
+        dest = output_thumbnail_dir / image.thumbnail.name
+        if not dest.exists():
+            if not dry_run:
+                shutil.copy2(image.thumbnail, dest)
+            counts[2] = 1
+
+    return tuple(counts)
+
+
+def _copy_videos_for_dates(
+    date_tracking: Dict[Tuple[str, str], bool],
+    output_dir: Path,
+    root: Path,
+    dry_run: bool = False,
+) -> int:
+    """
+    Copy day_summary.webm videos for dates that have classified images.
+
+    Parameters
+    ----------
+    date_tracking
+        Dict mapping (system, date_str) to True for dates with images
+    output_dir
+        Target directory (filtered_dir or not_filtered_dir)
+    root
+        Source root directory
+    dry_run
+        If True, don't actually copy files
+
+    Returns
+    -------
+    int
+        Number of videos copied
+    """
+    videos_copied = 0
+
+    for (system_name, date_str), _ in date_tracking.items():
+        # Source video path: root/system/date/thumbnails/day_summary.webm
+        source_video = root / system_name / date_str / THUMBNAIL_DIR_NAME / VIDEO_FILE_NAME
+
+        if not source_video.exists():
+            logger.debug(f"No video found for {system_name}/{date_str}")
+            continue
+
+        # Destination: output_dir/system/date/thumbnails/day_summary.webm
+        dest_video = (
+            output_dir / system_name / date_str / THUMBNAIL_DIR_NAME / VIDEO_FILE_NAME
+        )
+
+        # Create parent directory
+        if not dry_run:
+            dest_video.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy video (skip if already exists - from earlier in same run)
+        if not dest_video.exists():
+            if not dry_run:
+                shutil.copy2(source_video, dest_video)
+                logger.debug(f"Copied video: {source_video} -> {dest_video}")
+            videos_copied += 1
+
+    return videos_copied
+
+
+def _validate_model_paths(models: List[_ModelConfig]) -> None:
+    """
+    Validate that all model files exist before processing.
+
+    Parameters
+    ----------
+    models
+        List of model configurations
+
+    Raises
+    ------
+    ValueError
+        If any model file does not exist
+    """
+    missing = []
+    for i, model in enumerate(models):
+        if not model.model_path.exists() or not model.model_path.is_file():
+            missing.append(f"Model {i}: {model.model_path}")
+
+    if missing:
+        error_msg = "The following model files do not exist:\n" + "\n".join(missing)
+        raise ValueError(error_msg)
+
+
+def _get_default_classifier_config() -> Dict[str, Any]:
+    """
+    Create a default classifier configuration template.
+
+    Returns
+    -------
+    dict
+        Default configuration dictionary
+    """
+    return {
+        "root": "/path/to/media/root",
+        "filtered_dir": "/path/to/filtered/output",
+        "not_filtered_dir": "/path/to/not_filtered/output",
+        "systems": ["nightskycam5", "nightskycam7"],
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31",
+        "models": [
+            {
+                "model_path": "/path/to/model1.pt",
+                "probability_threshold": 0.7,
+                "classify_positive": True,
+            },
+            {
+                "model_path": "/path/to/model2.pt",
+                "probability_threshold": 0.5,
+                "classify_positive": False,
+            },
+        ],
+    }
+
+
+def _parse_classifier_config(config: Dict[str, Any]) -> _ClassifierConfig:
+    """
+    Parse and validate classifier configuration values.
+
+    Parameters
+    ----------
+    config
+        Configuration dictionary loaded from TOML
+
+    Returns
+    -------
+    _ClassifierConfig
+        Parsed configuration object
+
+    Raises
+    ------
+    ValueError
+        If configuration is invalid
+    """
+    # Required fields
+    required = ["root", "filtered_dir", "not_filtered_dir", "models"]
+    for field in required:
+        if field not in config:
+            raise ValueError(f"Configuration must include '{field}' field")
+
+    root = Path(config["root"])
+    filtered_dir = Path(config["filtered_dir"])
+    not_filtered_dir = Path(config["not_filtered_dir"])
+
+    # Validate root exists
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Root directory does not exist: {root}")
+
+    # Parse models array
+    models_data = config["models"]
+    if not isinstance(models_data, list) or len(models_data) == 0:
+        raise ValueError("'models' must be a non-empty array")
+
+    models = []
+    for i, model_data in enumerate(models_data):
+        if not isinstance(model_data, dict):
+            raise ValueError(f"Model {i} must be a table/dictionary")
+
+        if "model_path" not in model_data:
+            raise ValueError(f"Model {i} missing 'model_path'")
+
+        model_path = Path(model_data["model_path"])
+        threshold = model_data.get("probability_threshold", 0.5)
+        classify_positive = model_data.get("classify_positive", True)
+
+        # Validate threshold
+        if not isinstance(threshold, (int, float)):
+            raise ValueError(f"Model {i} threshold must be a number")
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError(f"Model {i} threshold must be between 0.0 and 1.0")
+
+        # Validate classify_positive
+        if not isinstance(classify_positive, bool):
+            raise ValueError(f"Model {i} classify_positive must be boolean")
+
+        models.append(_ModelConfig(model_path, threshold, classify_positive))
+
+    # Optional fields (systems, dates)
+    systems = config.get("systems", None)
+    if systems is not None and not isinstance(systems, list):
+        raise ValueError("'systems' must be a list of strings")
+
+    start_date = None
+    end_date = None
+
+    if "start_date" in config and config["start_date"]:
+        start_date = dt.datetime.strptime(config["start_date"], "%Y-%m-%d").date()
+
+    if "end_date" in config and config["end_date"]:
+        end_date = dt.datetime.strptime(config["end_date"], "%Y-%m-%d").date()
+
+    return _ClassifierConfig(
+        root=root,
+        filtered_dir=filtered_dir,
+        not_filtered_dir=not_filtered_dir,
+        models=models,
+        systems=systems,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+def scorer_classifier() -> None:
+    """
+    CLI tool to classify nightskycam images using multiple trained classifier models.
+
+    This tool uses multiple nightskycam-scorer classifiers to predict image quality
+    and copies images (with metadata and thumbnails) to filtered/not-filtered directories.
+    If ANY model returns true, the image is copied to filtered_dir, otherwise to not_filtered_dir.
+    """
+    app = typer.Typer(
+        help="Classify nightskycam images using multiple trained classifier models."
+    )
+
+    @app.command()
+    def run(
+        config_path: Optional[Path] = typer.Argument(
+            None,
+            help="Path to the TOML configuration file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        create_config: bool = typer.Option(
+            False,
+            "--create-config",
+            help="Create a default configuration file named 'nightskycam_classifier_config.toml' in the current directory.",
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Preview operations without copying files.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug logging (shows detailed inference operations).",
+        ),
+    ) -> None:
+        """
+        Classify images using multiple models and copy to filtered/not-filtered directories.
+        """
+        # Configure logging level
+        logger.remove()
+        if debug:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
+
+        # Handle --create-config
+        if create_config:
+            default_config = _get_default_classifier_config()
+            config_file_path = Path("nightskycam_classifier_config.toml")
+
+            if config_file_path.exists():
+                logger.error(f"Configuration file already exists: {config_file_path}")
+                logger.info("Remove the existing file or specify a different name.")
+                sys.exit(1)
+
+            _save_config(default_config, config_file_path)
+            logger.info(f"Created default configuration file: {config_file_path}")
+            logger.info(
+                "Please edit the file with your actual paths and settings, then run again."
+            )
+            sys.exit(0)
+
+        # Require config_path if not creating config
+        if config_path is None:
+            logger.error("No configuration file provided.")
+            logger.info(
+                "Use --create-config to generate a template, or provide a config file path."
+            )
+            sys.exit(1)
+
+        try:
+            # Load and parse configuration
+            logger.info(f"Loading configuration from: {config_path}")
+            config = _load_config(config_path)
+            parsed = _parse_classifier_config(config)
+
+            root = parsed.root
+            filtered_dir = parsed.filtered_dir
+            not_filtered_dir = parsed.not_filtered_dir
+            models = parsed.models
+            systems = parsed.systems
+            start_date = parsed.start_date
+            end_date = parsed.end_date
+
+            logger.info(f"Root directory: {root}")
+            logger.info(f"Filtered output directory: {filtered_dir}")
+            logger.info(f"Not-filtered output directory: {not_filtered_dir}")
+            logger.info(f"Number of models: {len(models)}")
+
+            if systems:
+                logger.info(f"Systems filter: {systems}")
+            if start_date or end_date:
+                logger.info(f"Date range: {start_date or 'any'} to {end_date or 'any'}")
+
+            # Validate all model paths before loading
+            logger.info("Validating model paths...")
+            _validate_model_paths(models)
+            logger.info("All model paths validated successfully")
+
+            # Load all models
+            logger.info(f"Loading {len(models)} model(s)...")
+            model_engines = []
+            for i, model_config in enumerate(models):
+                logger.info(
+                    f"  Loading model {i+1}/{len(models)}: {model_config.model_path.name}"
+                )
+                try:
+                    engine = _ModelInferenceEngine(
+                        model_config.model_path,
+                        model_config.probability_threshold,
+                        model_config.classify_positive,
+                    )
+                    model_engines.append(engine)
+                    logger.info(
+                        f"    Threshold: {model_config.probability_threshold}, "
+                        f"Classify positive: {model_config.classify_positive}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to load model {i+1}: {e}")
+                    sys.exit(1)
+
+            logger.info("All models loaded successfully")
+
+            # Create output directories
+            if not dry_run:
+                filtered_dir.mkdir(parents=True, exist_ok=True)
+                not_filtered_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Output directories ready")
+
+            if dry_run:
+                logger.info("[DRY-RUN MODE] No files will be copied")
+
+            # Statistics
+            stats = {
+                "total_images_scanned": 0,
+                "images_with_thumbnails": 0,
+                "images_without_thumbnails": 0,
+                "images_filtered": 0,
+                "images_not_filtered": 0,
+                "hd_files_copied": 0,
+                "toml_files_copied": 0,
+                "thumbnails_copied": 0,
+                "videos_copied_to_filtered": 0,
+                "videos_copied_to_not_filtered": 0,
+                "inference_errors": 0,
+                "copy_errors": 0,
+            }
+
+            # Date-level tracking for videos
+            dates_with_filtered: Dict[Tuple[str, str], bool] = {}
+            dates_with_not_filtered: Dict[Tuple[str, str], bool] = {}
+
+            logger.info("Starting image classification...")
+
+            # Iterate through systems
+            for system_path in walk_systems(root):
+                system_name = system_path.name
+
+                # Filter by system name if specified
+                if systems is not None and system_name not in systems:
+                    logger.debug(f"Skipping system (not in filter): {system_name}")
+                    continue
+
+                logger.info(f"Processing system: {system_name}")
+
+                # Iterate through dates in the system
+                for date_, date_path in walk_dates(system_path):
+                    # Filter by date range
+                    if not _is_within_date_range(date_, start_date, end_date):
+                        logger.debug(f"Skipping date (out of range): {date_}")
+                        continue
+
+                    date_str = date_.strftime("%Y_%m_%d")
+                    logger.info(f"  Processing date: {date_str}")
+
+                    # Get all images for this date
+                    try:
+                        images = get_images(date_path)
+                    except PermissionError as e:
+                        logger.error(
+                            f"    Permission denied accessing date directory: {e}"
+                        )
+                        stats["copy_errors"] += 1
+                        continue
+
+                    if not images:
+                        logger.debug(f"    No images found in {date_path}")
+                        continue
+
+                    logger.info(f"    Found {len(images)} images")
+
+                    date_filtered = 0
+                    date_not_filtered = 0
+
+                    # Process each image
+                    for image in images:
+                        stats["total_images_scanned"] += 1
+
+                        # Check thumbnail exists
+                        if not image.thumbnail or not image.thumbnail.exists():
+                            logger.debug(
+                                f"    Skipping {image.filename_stem} (no thumbnail)"
+                            )
+                            stats["images_without_thumbnails"] += 1
+                            continue
+
+                        stats["images_with_thumbnails"] += 1
+
+                        # Run inference with ALL models
+                        try:
+                            thumbnail_array = to_npy(image.thumbnail)
+
+                            # Check if ANY model returns True (OR logic)
+                            is_filtered = any(
+                                engine.should_filter(thumbnail_array)
+                                for engine in model_engines
+                            )
+
+                            if debug:
+                                # Log per-model results
+                                logger.debug(f"    Image: {image.filename_stem}")
+                                for engine in model_engines:
+                                    result = engine.should_filter(thumbnail_array)
+                                    logger.debug(
+                                        f"      {engine.model_name}: {result}"
+                                    )
+                                logger.debug(f"      Final decision: {'FILTERED' if is_filtered else 'NOT FILTERED'}")
+
+                        except Exception as e:
+                            logger.error(
+                                f"    Inference error for {image.filename_stem}: {e}"
+                            )
+                            stats["inference_errors"] += 1
+                            if debug:
+                                raise
+                            continue
+
+                        # Copy files based on classification
+                        try:
+                            if is_filtered:
+                                hd, toml, thumb = _copy_image_files(
+                                    image, filtered_dir, system_name, date_str, dry_run
+                                )
+                                stats["images_filtered"] += 1
+                                stats["hd_files_copied"] += hd
+                                stats["toml_files_copied"] += toml
+                                stats["thumbnails_copied"] += thumb
+                                dates_with_filtered[(system_name, date_str)] = True
+                                date_filtered += 1
+                            else:
+                                hd, toml, thumb = _copy_image_files(
+                                    image,
+                                    not_filtered_dir,
+                                    system_name,
+                                    date_str,
+                                    dry_run,
+                                )
+                                stats["images_not_filtered"] += 1
+                                stats["hd_files_copied"] += hd
+                                stats["toml_files_copied"] += toml
+                                stats["thumbnails_copied"] += thumb
+                                dates_with_not_filtered[(system_name, date_str)] = True
+                                date_not_filtered += 1
+
+                        except Exception as e:
+                            logger.error(
+                                f"    Copy error for {image.filename_stem}: {e}"
+                            )
+                            stats["copy_errors"] += 1
+                            if debug:
+                                raise
+
+                    logger.info(
+                        f"    Date summary - Filtered: {date_filtered}, Not filtered: {date_not_filtered}"
+                    )
+
+            # Copy videos for tracked dates
+            logger.info("Copying videos for dates with classified images...")
+            stats["videos_copied_to_filtered"] = _copy_videos_for_dates(
+                dates_with_filtered, filtered_dir, root, dry_run
+            )
+            stats["videos_copied_to_not_filtered"] = _copy_videos_for_dates(
+                dates_with_not_filtered, not_filtered_dir, root, dry_run
+            )
+
+            # Print summary statistics
+            logger.info("")
+            logger.info("=== Classification Summary ===")
+            logger.info(f"Total images scanned: {stats['total_images_scanned']}")
+            logger.info(
+                f"Images with thumbnails: {stats['images_with_thumbnails']}"
+            )
+            logger.info(
+                f"Images without thumbnails: {stats['images_without_thumbnails']}"
+            )
+            logger.info(f"Images filtered: {stats['images_filtered']}")
+            logger.info(f"Images not filtered: {stats['images_not_filtered']}")
+            logger.info(f"HD files copied: {stats['hd_files_copied']}")
+            logger.info(f"TOML files copied: {stats['toml_files_copied']}")
+            logger.info(f"Thumbnails copied: {stats['thumbnails_copied']}")
+            logger.info(
+                f"Videos copied to filtered: {stats['videos_copied_to_filtered']}"
+            )
+            logger.info(
+                f"Videos copied to not_filtered: {stats['videos_copied_to_not_filtered']}"
+            )
+            if stats["inference_errors"] > 0:
+                logger.warning(f"Inference errors: {stats['inference_errors']}")
+            if stats["copy_errors"] > 0:
+                logger.warning(f"Copy errors: {stats['copy_errors']}")
+
+            logger.info(f"Filtered directory: {filtered_dir}")
+            logger.info(f"Not-filtered directory: {not_filtered_dir}")
             logger.info("Done!")
 
             sys.exit(0)

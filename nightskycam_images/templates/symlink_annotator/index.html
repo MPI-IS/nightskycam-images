@@ -131,17 +131,23 @@
     <div class="container">
         <!-- Filter Controls -->
         <div class="row mb-4">
-            <div class="col-md-6">
+            <div class="col-md-5">
                 <label for="systemSelect" class="form-label fw-bold">System</label>
                 <select class="form-select form-select-lg" id="systemSelect">
                     <option selected disabled>Select a system...</option>
                 </select>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-5">
                 <label for="dateSelect" class="form-label fw-bold">Date</label>
                 <select class="form-select form-select-lg" id="dateSelect" disabled>
                     <option selected disabled>Select a date...</option>
                 </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">&nbsp;</label>
+                <button class="btn btn-primary btn-lg w-100" id="nextButton" disabled>
+                    Next →
+                </button>
             </div>
         </div>
 
@@ -177,6 +183,8 @@
         // State
         let currentSystem = null;
         let currentDate = null;
+        let allSystems = [];
+        let datesForSystem = {};
 
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
@@ -189,6 +197,7 @@
             try {
                 const response = await fetch('/api/systems');
                 const systems = await response.json();
+                allSystems = systems;
 
                 const systemSelect = document.getElementById('systemSelect');
                 systemSelect.innerHTML = '<option selected disabled>Select a system...</option>';
@@ -219,6 +228,9 @@
                 const response = await fetch(`/api/dates/${system}`);
                 const dates = await response.json();
 
+                // Store dates for this system
+                datesForSystem[system] = dates.map(d => d.value);
+
                 const dateSelect = document.getElementById('dateSelect');
                 dateSelect.innerHTML = '<option selected disabled>Select a date...</option>';
                 dateSelect.disabled = false;
@@ -240,6 +252,7 @@
                     const date = e.target.value;
                     currentDate = date;
                     loadImages(currentSystem, date);
+                    updateNextButton();
                 });
 
             } catch (error) {
@@ -420,6 +433,106 @@
                 console.error('Error updating counts:', error);
             }
         }
+
+        // Find next system and date
+        function findNextSystemDate() {
+            if (!currentSystem || !currentDate) {
+                return null;
+            }
+
+            // Get current system's dates
+            const currentDates = datesForSystem[currentSystem];
+            if (!currentDates) {
+                return null;
+            }
+
+            // Find current date index
+            const currentDateIndex = currentDates.indexOf(currentDate);
+            if (currentDateIndex === -1) {
+                return null;
+            }
+
+            // Check if there's a next date in current system
+            if (currentDateIndex < currentDates.length - 1) {
+                return {
+                    system: currentSystem,
+                    date: currentDates[currentDateIndex + 1]
+                };
+            }
+
+            // We're at the last date of current system, try next system
+            const currentSystemIndex = allSystems.indexOf(currentSystem);
+            if (currentSystemIndex === -1 || currentSystemIndex >= allSystems.length - 1) {
+                // No next system available
+                return null;
+            }
+
+            // Get next system
+            const nextSystem = allSystems[currentSystemIndex + 1];
+
+            // We need to check if the next system has dates loaded
+            // If not, we'll need to load them first
+            return {
+                system: nextSystem,
+                date: null, // Will be determined after loading dates
+                needsDateLoad: true
+            };
+        }
+
+        // Update next button state
+        function updateNextButton() {
+            const nextButton = document.getElementById('nextButton');
+
+            if (!currentSystem || !currentDate) {
+                nextButton.disabled = true;
+                return;
+            }
+
+            const next = findNextSystemDate();
+            nextButton.disabled = (next === null);
+        }
+
+        // Navigate to next date/system
+        async function goToNext() {
+            const next = findNextSystemDate();
+            if (!next) {
+                return;
+            }
+
+            const systemSelect = document.getElementById('systemSelect');
+            const dateSelect = document.getElementById('dateSelect');
+
+            if (next.system !== currentSystem) {
+                // Moving to next system
+                systemSelect.value = next.system;
+                currentSystem = next.system;
+
+                // Load dates for the new system
+                await loadDates(next.system);
+
+                // Select the first date
+                const dates = datesForSystem[next.system];
+                if (dates && dates.length > 0) {
+                    const firstDate = dates[0];
+                    dateSelect.value = firstDate;
+                    currentDate = firstDate;
+                    await loadImages(currentSystem, firstDate);
+                    updateNextButton();
+                }
+            } else {
+                // Moving to next date in same system
+                dateSelect.value = next.date;
+                currentDate = next.date;
+                await loadImages(currentSystem, next.date);
+                updateNextButton();
+            }
+        }
+
+        // Add event listener for next button
+        document.addEventListener('DOMContentLoaded', () => {
+            const nextButton = document.getElementById('nextButton');
+            nextButton.addEventListener('click', goToNext);
+        });
     </script>
 </body>
 </html>
