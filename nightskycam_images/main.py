@@ -1542,7 +1542,7 @@ def move_to_backup() -> None:
 
                         except Exception as e:
                             logger.error(f"Error processing {item}: {e}")
-                            raise  # Fail-fast
+                            continue
 
             # Cleanup empty directories
             if original_root is not None:
