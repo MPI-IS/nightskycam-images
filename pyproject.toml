@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nightskycam-images"
-version = "0.1.5"
+version = "0.1.7"
 description = ""
 authors = ["Vincent Berenz <vincent.berenz@tuebingen.mpg.de>"]
 readme = "README.md"
