@@ -1,0 +1,24 @@
+# Nightskycam image database update service.
+#
+# Installation:
+#   sudo cp nightskycam-db-update.service /etc/systemd/system/
+#   sudo cp nightskycam-db-update.timer /etc/systemd/system/
+#
+#   # Create config directory and file:
+#   sudo mkdir -p /etc/nightskycam
+#   sudo tee /etc/nightskycam/db-update.conf <<EOF
+#   ROOT=/path/to/media/root
+#   # ROOT2=/path/to/second/root  # optional
+#   # DB_PATH=/custom/path.db     # optional
+#   EOF
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nightskycam-db-update.timer
+
+[Unit]
+Description=Nightskycam image database update
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/nightskycam/db-update.conf
+ExecStart=/bin/bash -c 'nightskycam-db-update "$ROOT" ${ROOT2:+"$ROOT2"} ${DB_PATH:+--db-path "$DB_PATH"}'

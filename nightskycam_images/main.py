@@ -21,10 +21,12 @@ from nightskycam_scorer.utils import to_float_image
 from .annotator_webapp import create_app as create_annotator_app
 from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME, VIDEO_FILE_NAME
 from .convert_npy import to_npy
+from .db import get_default_db_path, populate as db_populate
 from .patches import load_image_and_extract_patches, save_patches_from_folder
 from .stats import generate_stats_report
 from .thumbnail import create_missing_thumbnails, _thumbnail_path
 from .video import VideoFormat, create_video
+from .db_view_webapp import create_app as create_db_view_app
 from .view_webapp import create_app as create_view_app
 from .walk import (
     _create_symlink_safe,
@@ -3734,5 +3736,424 @@ def classify_images() -> None:
             if debug:
                 raise
             sys.exit(1)
+
+    app()
+
+
+# ============================================================================
+# Database Update Command
+# ============================================================================
+
+
+def db_update() -> None:
+    """
+    CLI tool to populate/refresh the SQLite database from the filesystem.
+    """
+    app = typer.Typer(
+        help="Populate or refresh the image metadata database from the filesystem."
+    )
+
+    @app.command()
+    def run(
+        root: Path = typer.Argument(
+            ...,
+            help="Path to the media root directory.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        second_root: Optional[Path] = typer.Argument(
+            None,
+            help="Optional second media root directory.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        db_path: Optional[Path] = typer.Option(
+            None,
+            "--db-path",
+            help="Path to the SQLite database file. Defaults to ROOT/.nightskycam_images.db",
+            resolve_path=True,
+        ),
+        full: bool = typer.Option(
+            False,
+            "--full",
+            help="Force a full rescan of all directories, ignoring last scan timestamp.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug logging.",
+        ),
+    ) -> None:
+        """Scan the filesystem and populate the image metadata database."""
+        # Configure logging
+        logger.remove()
+        if debug:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
+
+        if db_path is None:
+            db_path_ = get_default_db_path(root)
+        else:
+            db_path_ = db_path
+
+        roots = [root]
+        if second_root is not None:
+            roots.append(second_root)
+
+        for r in roots:
+            logger.info(f"Root directory: {r}")
+        logger.info(f"Database path: {db_path_}")
+        logger.info(
+            f"Starting database population ({'full' if full else 'incremental'})..."
+        )
+
+        try:
+            stats = db_populate(roots, db_path_, full=full)
+
+            logger.info("")
+            logger.info("=== Database Update Summary ===")
+            logger.info(f"Folders scanned: {stats['folders_scanned']}")
+            logger.info(f"Folders skipped: {stats['folders_skipped']}")
+            logger.info(f"Images scanned: {stats['images_scanned']}")
+            logger.info(f"Images upserted: {stats['images_upserted']}")
+            logger.info(
+                f"Classifier scores upserted: {stats['classifiers_upserted']}"
+            )
+            if stats["errors"] > 0:
+                logger.warning(f"Errors: {stats['errors']}")
+            logger.info(f"Database: {db_path_}")
+            logger.info("Done!")
+            sys.exit(0)
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+
+    app()
+
+
+# ============================================================================
+# Database View Web Application
+# ============================================================================
+
+
+def db_view_webapp() -> None:
+    """
+    CLI tool to start the database-backed image viewer web application.
+    """
+    typer_app = typer.Typer(
+        help="Start the DB-backed image viewer web application."
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        host: str = typer.Option(
+            "127.0.0.1",
+            "--host",
+            help="Host to bind the web server to.",
+        ),
+        port: int = typer.Option(
+            5003,
+            "--port",
+            help="Port to bind the web server to.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug mode.",
+        ),
+    ) -> None:
+        """Start the database-backed image viewer."""
+        logger.info(f"Database: {db_path}")
+        logger.info(f"Starting DB viewer on http://{host}:{port}")
+        flask_app = create_db_view_app(db_path)
+        flask_app.run(host=host, port=port, debug=debug)
+
+    typer_app()
+
+
+# ============================================================================
+# Backup Classify-and-Route Command
+# ============================================================================
+
+
+def _move_image_files(
+    image: Any,
+    output_dir: Path,
+    system_name: str,
+    date_str: str,
+) -> Tuple[int, int, int]:
+    """
+    Move HD image, TOML, and thumbnail to output_dir preserving directory structure.
+
+    Returns
+    -------
+    tuple
+        (hd_moved, toml_moved, thumbnail_moved) counts (0 or 1 each)
+    """
+    output_date_dir = output_dir / system_name / date_str
+    output_thumbnail_dir = output_date_dir / THUMBNAIL_DIR_NAME
+
+    output_date_dir.mkdir(parents=True, exist_ok=True)
+    output_thumbnail_dir.mkdir(parents=True, exist_ok=True)
+
+    counts = [0, 0, 0]
+
+    if image.hd and image.hd.exists():
+        shutil.move(str(image.hd), output_date_dir / image.hd.name)
+        counts[0] = 1
+
+    if image.meta_path and image.meta_path.exists():
+        shutil.move(str(image.meta_path), output_date_dir / image.meta_path.name)
+        counts[1] = 1
+
+    if image.thumbnail and image.thumbnail.exists():
+        shutil.move(
+            str(image.thumbnail), output_thumbnail_dir / image.thumbnail.name
+        )
+        counts[2] = 1
+
+    return tuple(counts)
+
+
+def _parse_model_spec(spec: str) -> Tuple[str, Path, float]:
+    """
+    Parse a model specification string "name:path:threshold".
+
+    Returns
+    -------
+    tuple
+        (name, model_path, threshold)
+    """
+    parts = spec.split(":")
+    if len(parts) != 3:
+        raise ValueError(
+            f"Invalid model spec '{spec}'. Expected format: name:path:threshold"
+        )
+    name = parts[0]
+    model_path = Path(parts[1])
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    threshold = float(parts[2])
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"Threshold must be between 0.0 and 1.0, got {threshold}")
+    return name, model_path, threshold
+
+
+def backup_route() -> None:
+    """
+    CLI tool to classify new images in a root directory and move
+    bad-weather images to a separate directory.
+    """
+    app = typer.Typer(
+        help=(
+            "Classify unprocessed images and move bad-weather ones "
+            "to a separate root directory."
+        )
+    )
+
+    @app.command()
+    def run(
+        root: Path = typer.Argument(
+            ...,
+            help="Root directory to scan for unclassified images.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        bad_root: Path = typer.Option(
+            ...,
+            "--bad-root",
+            help="Destination root for bad-weather images.",
+            resolve_path=True,
+        ),
+        model: List[str] = typer.Option(
+            ...,
+            "--model",
+            help="Model spec as name:path:threshold (repeatable).",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug logging.",
+        ),
+    ) -> None:
+        """Classify images and move bad-weather ones to bad_root."""
+        logger.remove()
+        if debug:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
+
+        try:
+            model_specs = [_parse_model_spec(m) for m in model]
+        except (ValueError, FileNotFoundError) as e:
+            logger.error(str(e))
+            sys.exit(1)
+
+        logger.info(f"Root: {root}")
+        logger.info(f"Bad-weather destination: {bad_root}")
+        for name, mpath, thresh in model_specs:
+            logger.info(f"  Model '{name}': {mpath} (threshold={thresh})")
+
+        logger.info(f"Loading {len(model_specs)} model(s)...")
+        scorers: Dict[str, SkyScorer] = {}
+        thresholds: Dict[str, float] = {}
+        for name, mpath, thresh in model_specs:
+            try:
+                scorers[name] = SkyScorer(str(mpath), validate_size=False)
+                thresholds[name] = thresh
+            except Exception as e:
+                logger.error(f"Failed to load model '{name}': {e}")
+                sys.exit(1)
+        logger.info("All models loaded")
+
+        bad_root.mkdir(parents=True, exist_ok=True)
+
+        stats = {
+            "scanned": 0,
+            "skipped_no_thumbnail": 0,
+            "skipped_no_toml": 0,
+            "skipped_already_classified": 0,
+            "classified": 0,
+            "routed_good": 0,
+            "routed_bad": 0,
+            "moved_files": 0,
+            "errors": 0,
+        }
+
+        logger.info("Scanning for unclassified images...")
+
+        try:
+            for system_path in walk_systems(root):
+                system_name = system_path.name
+                logger.info(f"System: {system_name}")
+
+                for date_, date_path in walk_dates(system_path):
+                    date_str = date_.strftime("%Y_%m_%d")
+
+                    try:
+                        images = get_images(date_path)
+                    except Exception as e:
+                        logger.error(f"  Error reading {date_path}: {e}")
+                        stats["errors"] += 1
+                        continue
+
+                    if not images:
+                        continue
+
+                    date_bad = 0
+                    date_good = 0
+
+                    for image in images:
+                        stats["scanned"] += 1
+
+                        thumbnail_path = image.thumbnail
+                        if thumbnail_path is None or not thumbnail_path.exists():
+                            stats["skipped_no_thumbnail"] += 1
+                            continue
+
+                        meta_path = image.meta_path
+                        if meta_path is None:
+                            stats["skipped_no_toml"] += 1
+                            continue
+
+                        with open(meta_path, "rb") as f:
+                            meta_data = tomli.load(f)
+
+                        if "classifiers" in meta_data:
+                            stats["skipped_already_classified"] += 1
+                            continue
+
+                        try:
+                            thumbnail_array = to_npy(thumbnail_path)
+                            rgb_float = to_float_image(thumbnail_array)
+
+                            classifier_scores: Dict[str, float] = {}
+                            for name, scorer in scorers.items():
+                                result_raw = scorer.predict(rgb_float)
+                                result = (
+                                    result_raw[0]
+                                    if isinstance(result_raw, list)
+                                    else result_raw
+                                )
+                                classifier_scores[name] = float(result.probability)
+
+                            meta_data["classifiers"] = classifier_scores
+                            with open(meta_path, "wb") as f:
+                                tomli_w.dump(meta_data, f)
+
+                            stats["classified"] += 1
+
+                            is_bad = any(
+                                classifier_scores[n] > thresholds[n]
+                                for n in scorers
+                            )
+
+                            if is_bad:
+                                hd, toml_, thumb = _move_image_files(
+                                    image, bad_root, system_name, date_str
+                                )
+                                stats["routed_bad"] += 1
+                                stats["moved_files"] += hd + toml_ + thumb
+                                date_bad += 1
+                                logger.debug(
+                                    f"    {image.filename_stem} -> bad "
+                                    f"({classifier_scores})"
+                                )
+                            else:
+                                stats["routed_good"] += 1
+                                date_good += 1
+                                logger.debug(
+                                    f"    {image.filename_stem} -> good "
+                                    f"({classifier_scores})"
+                                )
+
+                        except Exception as e:
+                            logger.error(
+                                f"    Error classifying {image.filename_stem}: {e}"
+                            )
+                            stats["errors"] += 1
+                            if debug:
+                                raise
+
+                    if date_bad > 0 or date_good > 0:
+                        logger.info(
+                            f"  {date_str}: {date_good} good, {date_bad} bad"
+                        )
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+
+        logger.info("")
+        logger.info("=== Route Summary ===")
+        logger.info(f"Images scanned: {stats['scanned']}")
+        logger.info(f"Already classified (skipped): {stats['skipped_already_classified']}")
+        logger.info(f"Classified this run: {stats['classified']}")
+        logger.info(f"Routed good: {stats['routed_good']}")
+        logger.info(f"Routed bad (moved): {stats['routed_bad']}")
+        logger.info(f"Files moved: {stats['moved_files']}")
+        if stats["errors"] > 0:
+            logger.warning(f"Errors: {stats['errors']}")
+        logger.info("Done!")
 
     app()

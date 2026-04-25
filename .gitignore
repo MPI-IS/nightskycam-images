@@ -12,5 +12,10 @@ venv
 # mypy
 .mypy_cache/
 
+# SQLite databases
+*.db
+
 # Editors.
 *~
+
+dist/

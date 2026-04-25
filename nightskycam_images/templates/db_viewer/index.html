@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+
+{% block title %}Nightskycam DB Viewer{% endblock %}
+
+{% block extra_css %}
+<style>
+    .filter-bar {
+        background: #e9ecef;
+        padding: 0.75rem 1rem;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+    }
+    .filter-bar label {
+        font-weight: 600;
+        font-size: 0.85rem;
+        margin-right: 0.25rem;
+    }
+    .filter-bar select, .filter-bar input {
+        font-size: 0.85rem;
+    }
+    .clf-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        margin-right: 1rem;
+    }
+    .clf-group input[type=range] {
+        width: 100px;
+    }
+    .badge-info {
+        font-size: 0.7rem;
+        padding: 0.15rem 0.4rem;
+    }
+    .thumb-meta {
+        font-size: 0.75rem;
+        color: #6c757d;
+    }
+    .image-links {
+        margin-top: 0.25rem;
+        font-size: 0.8rem;
+    }
+    .image-links a {
+        margin-right: 0.5rem;
+        font-weight: 600;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-3">
+
+    <!-- Filter bar -->
+    <div class="filter-bar" id="filterBar">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label for="filterStretched">Stretched</label>
+                <select class="form-select form-select-sm" id="filterStretched">
+                    <option value="all" selected>All</option>
+                    <option value="yes">Stretched</option>
+                    <option value="no">Not stretched</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label for="filterFormat">Format</label>
+                <select class="form-select form-select-sm" id="filterFormat">
+                    <option value="all" selected>All</option>
+                    <option value="jpg">JPEG</option>
+                    <option value="tiff">TIFF</option>
+                    <option value="npy">NPY</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label for="filterCloudCover">Cloud cover max</label>
+                <input type="number" class="form-control form-control-sm" id="filterCloudCover"
+                       min="0" max="100" placeholder="--" style="width:70px;">
+            </div>
+            <div class="col-auto" id="classifierFilters">
+                <!-- Populated dynamically -->
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-primary" onclick="applyFilters()">Apply</button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="resetFilters()">Reset</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- System / Date selectors -->
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <label for="systemSelect" class="form-label fw-bold">System</label>
+            <select class="form-select" id="systemSelect">
+                <option selected disabled>Select a system...</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label for="dateSelect" class="form-label fw-bold">Date</label>
+            <select class="form-select" id="dateSelect" disabled>
+                <option selected disabled>Select a date...</option>
+            </select>
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+            <div id="imageCount" class="text-muted d-none">
+                <strong>Images:</strong> <span id="imageCountNumber">0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <div id="topNavigation" class="mb-3 d-none">
+        <button id="topNextButton" class="btn btn-primary btn-sm" onclick="navigateNext()">
+            Next &rarr; <span id="topNextLabel"></span>
+        </button>
+    </div>
+
+    <!-- Loading -->
+    <div id="loadingIndicator" class="text-center d-none my-5">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <!-- Thumbnail grid -->
+    <div id="thumbnailGrid" class="thumbnail-grid"></div>
+
+    <!-- Bottom navigation -->
+    <div id="bottomNavigation" class="mt-3 mb-4 d-none">
+        <button id="bottomNextButton" class="btn btn-primary btn-sm" onclick="navigateNext()">
+            Next &rarr; <span id="bottomNextLabel"></span>
+        </button>
+    </div>
+
+    <!-- No images -->
+    <div id="noImagesMessage" class="alert alert-info d-none">
+        No images match the current filters.
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentSystem = null;
+let currentDate = null;
+let allSystems = [];
+let allDates = [];
+let classifierNames = [];
+
+document.addEventListener('DOMContentLoaded', async function() {
+    await loadClassifiers();
+    await loadSystems();
+});
+
+async function loadClassifiers() {
+    try {
+        const resp = await fetch('/api/classifiers');
+        classifierNames = await resp.json();
+        const container = document.getElementById('classifierFilters');
+        classifierNames.forEach(name => {
+            const div = document.createElement('span');
+            div.className = 'clf-group';
+            div.innerHTML = `
+                <label for="clf_${name}">${name} &le;</label>
+                <input type="range" id="clf_${name}" min="0" max="100" value="100" step="1"
+                       oninput="document.getElementById('clf_${name}_val').textContent = this.value + '%'">
+                <small id="clf_${name}_val">100%</small>
+            `;
+            container.appendChild(div);
+        });
+    } catch (e) {
+        console.error('Error loading classifiers:', e);
+    }
+}
+
+async function loadSystems() {
+    try {
+        const resp = await fetch('/api/systems');
+        allSystems = await resp.json();
+        const sel = document.getElementById('systemSelect');
+        allSystems.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s;
+            opt.textContent = s;
+            sel.appendChild(opt);
+        });
+        sel.addEventListener('change', function() { loadDates(this.value); });
+    } catch (e) {
+        console.error('Error loading systems:', e);
+    }
+}
+
+async function loadDates(system) {
+    try {
+        const resp = await fetch(`/api/dates/${system}`);
+        allDates = await resp.json();
+        const sel = document.getElementById('dateSelect');
+        const newSel = sel.cloneNode(false);
+        sel.parentNode.replaceChild(newSel, sel);
+        newSel.innerHTML = '<option selected disabled>Select a date...</option>';
+        newSel.disabled = false;
+        allDates.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.value;
+            opt.textContent = d.display;
+            newSel.appendChild(opt);
+        });
+        document.getElementById('thumbnailGrid').innerHTML = '';
+        document.getElementById('imageCount').classList.add('d-none');
+        document.getElementById('noImagesMessage').classList.add('d-none');
+        hideNav();
+        newSel.addEventListener('change', function() { loadImages(system, this.value); });
+    } catch (e) {
+        console.error('Error loading dates:', e);
+    }
+}
+
+function buildFilterParams() {
+    const params = new URLSearchParams();
+    const stretched = document.getElementById('filterStretched').value;
+    if (stretched !== 'all') params.set('stretched', stretched);
+    const fmt = document.getElementById('filterFormat').value;
+    if (fmt !== 'all') params.set('format', fmt);
+    const cc = document.getElementById('filterCloudCover').value;
+    if (cc !== '') params.set('cloud_cover_max', cc);
+    classifierNames.forEach(name => {
+        const slider = document.getElementById(`clf_${name}`);
+        if (slider && parseInt(slider.value) < 100) {
+            params.set(`clf_${name}`, (parseInt(slider.value) / 100).toFixed(2));
+        }
+    });
+    return params.toString();
+}
+
+async function loadImages(system, date) {
+    currentSystem = system;
+    currentDate = date;
+    const grid = document.getElementById('thumbnailGrid');
+    const loading = document.getElementById('loadingIndicator');
+    const noMsg = document.getElementById('noImagesMessage');
+    const countEl = document.getElementById('imageCount');
+    const countNum = document.getElementById('imageCountNumber');
+
+    grid.innerHTML = '';
+    noMsg.classList.add('d-none');
+    countEl.classList.add('d-none');
+    loading.classList.remove('d-none');
+
+    try {
+        const qs = buildFilterParams();
+        const url = `/api/images/${system}/${date}` + (qs ? '?' + qs : '');
+        const resp = await fetch(url);
+        const images = await resp.json();
+        loading.classList.add('d-none');
+
+        if (images.length === 0) {
+            noMsg.classList.remove('d-none');
+            hideNav();
+            return;
+        }
+
+        countNum.textContent = images.length;
+        countEl.classList.remove('d-none');
+
+        images.forEach(img => {
+            grid.appendChild(createCard(img));
+        });
+
+        updateNav();
+    } catch (e) {
+        loading.classList.add('d-none');
+        console.error('Error loading images:', e);
+    }
+}
+
+function createCard(img) {
+    const card = document.createElement('div');
+    card.className = 'thumbnail-card';
+
+    let badges = '';
+    if (img.weather) badges += `<span class="badge bg-info badge-info">${img.weather}</span> `;
+    if (img.cloud_cover !== null) badges += `<span class="badge bg-secondary badge-info">cc:${img.cloud_cover}%</span> `;
+    if (img.stretched) badges += `<span class="badge bg-warning text-dark badge-info">stretched</span> `;
+    if (img.image_format) badges += `<span class="badge bg-dark badge-info">${img.image_format}</span> `;
+
+    let clfText = '';
+    if (img.classifiers && Object.keys(img.classifiers).length > 0) {
+        const parts = Object.entries(img.classifiers).map(
+            ([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`
+        );
+        clfText = `<div class="thumb-meta">${parts.join(' | ')}</div>`;
+    }
+
+    let links = `<a href="${img.jpeg_url}" target="_blank">jpeg</a>`;
+    if (img.raw_url) {
+        links += `<a href="${img.raw_url}">raw ${img.image_format}</a>`;
+    }
+
+    card.innerHTML = `
+        <img src="${img.thumbnail_url}" class="thumbnail-img" alt="${img.filename_stem}"
+             loading="lazy">
+        <div class="thumbnail-info">
+            <div class="text-truncate text-muted" title="${img.filename_stem}">
+                <small>${img.time.replace(/_/g, ':')}</small>
+            </div>
+            <div>${badges}</div>
+            ${clfText}
+            <div class="image-links">${links}</div>
+        </div>
+    `;
+
+    return card;
+}
+
+function applyFilters() {
+    if (currentSystem && currentDate) {
+        loadImages(currentSystem, currentDate);
+    }
+}
+
+function resetFilters() {
+    document.getElementById('filterStretched').value = 'all';
+    document.getElementById('filterFormat').value = 'all';
+    document.getElementById('filterCloudCover').value = '';
+    classifierNames.forEach(name => {
+        const slider = document.getElementById(`clf_${name}`);
+        if (slider) {
+            slider.value = 100;
+            document.getElementById(`clf_${name}_val`).textContent = '100%';
+        }
+    });
+    if (currentSystem && currentDate) {
+        loadImages(currentSystem, currentDate);
+    }
+}
+
+// ---- Navigation (same logic as file-based viewer) ----
+
+function getNext() {
+    if (!currentSystem || !currentDate) return null;
+    const di = allDates.findIndex(d => d.value === currentDate);
+    if (di === -1) return null;
+    if (di < allDates.length - 1) {
+        return { system: currentSystem, date: allDates[di+1].value, display: allDates[di+1].display };
+    }
+    const si = allSystems.indexOf(currentSystem);
+    if (si === -1 || si >= allSystems.length - 1) return null;
+    return { system: allSystems[si+1], date: null, display: null, needsDateLoad: true };
+}
+
+async function navigateNext() {
+    const next = getNext();
+    if (!next) return;
+    if (next.needsDateLoad) {
+        const resp = await fetch(`/api/dates/${next.system}`);
+        const dates = await resp.json();
+        if (!dates.length) return;
+        allDates = dates;
+        next.date = dates[0].value;
+        document.getElementById('systemSelect').value = next.system;
+        const ds = document.getElementById('dateSelect');
+        ds.innerHTML = '<option selected disabled>Select a date...</option>';
+        dates.forEach(d => {
+            const o = document.createElement('option');
+            o.value = d.value; o.textContent = d.display;
+            ds.appendChild(o);
+        });
+        ds.value = next.date; ds.disabled = false;
+    } else {
+        document.getElementById('dateSelect').value = next.date;
+    }
+    loadImages(next.system, next.date);
+}
+
+function hideNav() {
+    document.getElementById('topNavigation').classList.add('d-none');
+    document.getElementById('bottomNavigation').classList.add('d-none');
+}
+
+function updateNav() {
+    const next = getNext();
+    const show = !!next;
+    ['top', 'bottom'].forEach(pos => {
+        const nav = document.getElementById(`${pos}Navigation`);
+        const lbl = document.getElementById(`${pos}NextLabel`);
+        if (show) {
+            lbl.textContent = next.needsDateLoad
+                ? `${next.system} (first date)`
+                : `${next.system} / ${next.display}`;
+            nav.classList.remove('d-none');
+        } else {
+            nav.classList.add('d-none');
+        }
+    });
+}
+</script>
+{% endblock %}

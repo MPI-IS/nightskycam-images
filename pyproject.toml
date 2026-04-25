@@ -27,26 +27,38 @@ scikit-learn = "^1.7.2"
 rich = "^14.2.0"
 
 [tool.poetry.scripts]
-nightskycam-thumbnails = 'nightskycam_images.main:thumbnails'
-nightskycam-annotator = 'nightskycam_images.annotator.cli:app'
-nightskycam-thumbnails-annotator-webapp = 'nightskycam_images.main:annotator_webapp'
-nightskycam-classifier = 'nightskycam_images.classifier.main:app'
-nightskycam-classify-images = 'nightskycam_images.main:classify_images'
-nightskycam-filter-export = 'nightskycam_images.main:filter_export'
-nightskycam-filter-copy = 'nightskycam_images.main:filter_copy'
-nightskycam-stats = 'nightskycam_images.main:stats'
-nightskycam-view-webapp = 'nightskycam_images.main:view_webapp'
-nightskycam-remove-selected = 'nightskycam_images.main:remove_selected'
-nightskycam-move-to-backup = 'nightskycam_images.main:move_to_backup'
-nightskycam-delete-from-other = 'nightskycam_images.main:delete_from_other_root'
-nightskycam-move-clear-images = 'nightskycam_images.main:move_clear_images_cli'
-nightskycam-scorer-filter = 'nightskycam_images.main:scorer_filter'
-nightskycam-scorer-classifier = 'nightskycam_images.main:scorer_classifier'
-nightskycam-copy-thumbnails = 'nightskycam_images.main:copy_thumbnails'
-nightskycam-check-thumbnails = 'nightskycam_images.main:check_thumbnails'
-nightskycam-create-missing-thumbnails = 'nightskycam_images.main:create_missing_thumbnails_cli'
-nightskycam-save-patches = 'nightskycam_images.main:save_patches'
-nightskycam-symlink-annotator-webapp = 'nightskycam_images.main:symlink_annotator_webapp'
+# ns.thumb.* — Thumbnail management
+"ns.thumb.list" = 'nightskycam_images.main:thumbnails'
+"ns.thumb.check" = 'nightskycam_images.main:check_thumbnails'
+"ns.thumb.create" = 'nightskycam_images.main:create_missing_thumbnails_cli'
+"ns.thumb.copy" = 'nightskycam_images.main:copy_thumbnails'
+# ns.files.* — File/folder operations
+"ns.files.backup" = 'nightskycam_images.main:move_to_backup'
+"ns.files.delete-from-other" = 'nightskycam_images.main:delete_from_other_root'
+"ns.files.move-clear" = 'nightskycam_images.main:move_clear_images_cli'
+"ns.files.remove-selected" = 'nightskycam_images.main:remove_selected'
+# ns.files.web.* — Web applications (file-based)
+"ns.files.web.view" = 'nightskycam_images.main:view_webapp'
+"ns.files.web.annotate" = 'nightskycam_images.main:annotator_webapp'
+"ns.files.web.annotate-symlinks" = 'nightskycam_images.main:symlink_annotator_webapp'
+# ns.filter.* — Filtering & export
+"ns.filter.export" = 'nightskycam_images.main:filter_export'
+"ns.filter.copy" = 'nightskycam_images.main:filter_copy'
+"ns.filter.scorer" = 'nightskycam_images.main:scorer_filter'
+# ns.ml.* — Machine learning / classification
+"ns.ml.classify" = 'nightskycam_images.main:classify_images'
+"ns.ml.scorer" = 'nightskycam_images.main:scorer_classifier'
+"ns.ml.train" = 'nightskycam_images.classifier.main:app'
+# ns.backup.* — Backup pipeline
+"ns.backup.route" = 'nightskycam_images.main:backup_route'
+# ns.db.* — Database
+"ns.db.update" = 'nightskycam_images.main:db_update'
+"ns.db.stats" = 'nightskycam_images.main:stats'
+"ns.db.web.view" = 'nightskycam_images.main:db_view_webapp'
+# ns.annotate — Annotation CLI
+"ns.annotate" = 'nightskycam_images.annotator.cli:app'
+# ns.util.* — Utilities
+"ns.util.patches" = 'nightskycam_images.main:save_patches'
 
 [build-system]
 requires = ["poetry-core"]
