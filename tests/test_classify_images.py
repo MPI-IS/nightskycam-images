@@ -423,3 +423,293 @@ def test_classify_images_idempotent():
                     classifiers = image.classifiers
                     assert list(classifiers.keys()) == ["cloudy"]
                     assert 0.0 <= classifiers["cloudy"] <= 1.0
+
+
+# ============================================================================
+# second_root config tests
+# ============================================================================
+
+
+def test_parse_config_second_root_valid():
+    """Config with a valid second_root is parsed."""
+    with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+        model = Path(tmp_a) / "model.pt"
+        model.touch()
+        config = {
+            "root": tmp_a,
+            "second_root": tmp_b,
+            "models": {"quality": str(model)},
+        }
+        parsed = _parse_classify_images_config(config)
+        assert parsed.root == Path(tmp_a)
+        assert parsed.second_root == Path(tmp_b)
+
+
+def test_parse_config_second_root_missing_dir():
+    """Config pointing second_root at a non-existent directory raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = Path(tmp_dir) / "model.pt"
+        model.touch()
+        config = {
+            "root": tmp_dir,
+            "second_root": "/nonexistent/path/does/not/exist",
+            "models": {"quality": str(model)},
+        }
+        with pytest.raises(ValueError, match="Second root"):
+            _parse_classify_images_config(config)
+
+
+def test_parse_config_second_root_defaults_to_none():
+    """Config without second_root parses successfully with second_root=None."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = Path(tmp_dir) / "model.pt"
+        model.touch()
+        config = {
+            "root": tmp_dir,
+            "models": {"quality": str(model)},
+        }
+        parsed = _parse_classify_images_config(config)
+        assert parsed.second_root is None
+
+
+def test_config_to_dict_round_trip_with_second_root():
+    """second_root survives serialize/parse round trip."""
+    with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+        model = Path(tmp_a) / "model.pt"
+        model.touch()
+        original = _ClassifyImagesConfig(
+            root=Path(tmp_a),
+            second_root=Path(tmp_b),
+            models={"quality": model},
+        )
+        as_dict = _classify_images_config_to_dict(original)
+        assert as_dict["second_root"] == str(tmp_b)
+        parsed = _parse_classify_images_config(as_dict)
+        assert parsed.second_root == Path(tmp_b)
+
+
+# ============================================================================
+# classifier_runner.classify_image_inplace tests (fake scorers, no real models)
+# ============================================================================
+
+
+class _FakeResult:
+    def __init__(self, probability: float) -> None:
+        self.probability = probability
+
+
+class _FakeScorer:
+    """Minimal stand-in for SkyScorer used in unit tests."""
+
+    def __init__(self, probability: float) -> None:
+        self._p = probability
+        self.calls = 0
+
+    def predict(self, image):  # noqa: D401, ARG002
+        self.calls += 1
+        return _FakeResult(self._p)
+
+
+def _make_one_image(tmp: Path, meta: Dict) -> tuple[Path, Path, Path]:
+    """Create one image (HD + thumbnail + TOML) under ``tmp`` and return paths."""
+    system = "testcam"
+    date_str = "2025_06_15"
+    time_str = "20_00_00"
+    stem = f"{system}_{date_str}_{time_str}"
+
+    date_dir = tmp / system / date_str
+    date_dir.mkdir(parents=True)
+    thumb_dir = date_dir / THUMBNAIL_DIR_NAME
+    thumb_dir.mkdir()
+
+    hd = np.random.randint(0, 255, (40, 40, 3), dtype=np.uint8)
+    cv2.imwrite(str(date_dir / f"{stem}.jpg"), hd)
+    thumb = np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8)
+    thumbnail_path = thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"
+    cv2.imwrite(str(thumbnail_path), thumb)
+    meta_path = date_dir / f"{stem}.toml"
+    with open(meta_path, "wb") as f:
+        tomli_w.dump(meta, f)
+
+    return thumbnail_path, meta_path, date_dir
+
+
+def test_classify_image_inplace_fills_all_when_empty():
+    """No [classifiers] section in TOML: all configured scorers run."""
+    from nightskycam_images.classifier_runner import classify_image_inplace
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        thumb, meta_path, _ = _make_one_image(
+            tmp, {"process": "raw", "weather": "clear"}
+        )
+        cloudy = _FakeScorer(0.7)
+        rainy = _FakeScorer(0.2)
+        scorers = {"cloudy": cloudy, "rainy": rainy}
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        updated, modified = classify_image_inplace(
+            thumb, meta_path, meta, scorers, overwrite=False
+        )
+
+        assert modified is True
+        assert cloudy.calls == 1
+        assert rainy.calls == 1
+        assert updated["classifiers"] == pytest.approx(
+            {"cloudy": 0.7, "rainy": 0.2}
+        )
+        # TOML on disk reflects the change.
+        with open(meta_path, "rb") as f:
+            on_disk = tomli.load(f)
+        assert on_disk["classifiers"] == pytest.approx(
+            {"cloudy": 0.7, "rainy": 0.2}
+        )
+        assert on_disk["process"] == "raw"
+        assert on_disk["weather"] == "clear"
+
+
+def test_classify_image_inplace_fills_only_missing_without_overwrite():
+    """Existing configured keys are preserved; only missing ones run."""
+    from nightskycam_images.classifier_runner import classify_image_inplace
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        thumb, meta_path, _ = _make_one_image(
+            tmp,
+            {"process": "raw", "classifiers": {"cloudy": 0.99}},
+        )
+        cloudy = _FakeScorer(0.1)
+        rainy = _FakeScorer(0.3)
+        scorers = {"cloudy": cloudy, "rainy": rainy}
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        updated, modified = classify_image_inplace(
+            thumb, meta_path, meta, scorers, overwrite=False
+        )
+
+        assert modified is True
+        assert cloudy.calls == 0  # already present, skipped
+        assert rainy.calls == 1
+        assert updated["classifiers"]["cloudy"] == pytest.approx(0.99)
+        assert updated["classifiers"]["rainy"] == pytest.approx(0.3)
+
+
+def test_classify_image_inplace_no_op_when_all_present_no_overwrite():
+    """All configured keys already present, no overwrite: nothing runs, no write."""
+    from nightskycam_images.classifier_runner import classify_image_inplace
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        original_meta = {
+            "process": "raw",
+            "classifiers": {"cloudy": 0.5, "rainy": 0.6},
+        }
+        thumb, meta_path, _ = _make_one_image(tmp, original_meta)
+        mtime_before = meta_path.stat().st_mtime_ns
+
+        cloudy = _FakeScorer(0.1)
+        rainy = _FakeScorer(0.1)
+        scorers = {"cloudy": cloudy, "rainy": rainy}
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        updated, modified = classify_image_inplace(
+            thumb, meta_path, meta, scorers, overwrite=False
+        )
+
+        assert modified is False
+        assert cloudy.calls == 0
+        assert rainy.calls == 0
+        assert updated["classifiers"] == pytest.approx(
+            {"cloudy": 0.5, "rainy": 0.6}
+        )
+        # TOML was not rewritten.
+        assert meta_path.stat().st_mtime_ns == mtime_before
+
+
+def test_classify_image_inplace_overwrites_all_when_overwrite():
+    """overwrite=True reruns every configured scorer."""
+    from nightskycam_images.classifier_runner import classify_image_inplace
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        thumb, meta_path, _ = _make_one_image(
+            tmp, {"classifiers": {"cloudy": 0.99, "rainy": 0.99}}
+        )
+        cloudy = _FakeScorer(0.1)
+        rainy = _FakeScorer(0.2)
+        scorers = {"cloudy": cloudy, "rainy": rainy}
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        updated, modified = classify_image_inplace(
+            thumb, meta_path, meta, scorers, overwrite=True
+        )
+
+        assert modified is True
+        assert cloudy.calls == 1
+        assert rainy.calls == 1
+        assert updated["classifiers"] == pytest.approx(
+            {"cloudy": 0.1, "rainy": 0.2}
+        )
+
+
+def test_classify_image_inplace_preserves_unconfigured_keys():
+    """Classifier keys in TOML that aren't named in the config survive."""
+    from nightskycam_images.classifier_runner import classify_image_inplace
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        thumb, meta_path, _ = _make_one_image(
+            tmp,
+            {"classifiers": {"legacy_model": 0.42}},
+        )
+        cloudy = _FakeScorer(0.6)
+        scorers = {"cloudy": cloudy}
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        updated, modified = classify_image_inplace(
+            thumb, meta_path, meta, scorers, overwrite=True
+        )
+
+        assert modified is True
+        assert updated["classifiers"]["legacy_model"] == pytest.approx(0.42)
+        assert updated["classifiers"]["cloudy"] == pytest.approx(0.6)
+
+
+def test_make_populate_enricher_tracks_stats():
+    """The enricher closure updates the stats dict as it runs."""
+    from nightskycam_images.classifier_runner import make_populate_enricher
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        thumb, meta_path, _ = _make_one_image(
+            tmp, {"process": "raw"}
+        )
+        cloudy = _FakeScorer(0.8)
+        scorers = {"cloudy": cloudy}
+
+        enricher, stats = make_populate_enricher(scorers, overwrite=False)
+        assert stats == {
+            "classifier_runs": 0,
+            "classifier_writes": 0,
+            "classifier_errors": 0,
+        }
+
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        enriched = enricher(thumb, meta_path, meta)
+        assert enriched["classifiers"]["cloudy"] == pytest.approx(0.8)
+        assert stats["classifier_runs"] == 1
+        assert stats["classifier_writes"] == 1
+        assert stats["classifier_errors"] == 0
+
+        # Re-running on the same image is a no-op without overwrite.
+        with open(meta_path, "rb") as f:
+            meta = tomli.load(f)
+        enricher(thumb, meta_path, meta)
+        assert stats["classifier_runs"] == 1  # unchanged
+        assert stats["classifier_writes"] == 1

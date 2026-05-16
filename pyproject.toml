@@ -37,6 +37,7 @@ rich = "^14.2.0"
 "ns.files.delete-from-other" = 'nightskycam_images.main:delete_from_other_root'
 "ns.files.move-clear" = 'nightskycam_images.main:move_clear_images_cli'
 "ns.files.remove-selected" = 'nightskycam_images.main:remove_selected'
+"ns.files.stats" = 'nightskycam_images.main:stats'
 # ns.files.web.* — Web applications (file-based)
 "ns.files.web.view" = 'nightskycam_images.main:view_webapp'
 "ns.files.web.annotate" = 'nightskycam_images.main:annotator_webapp'
@@ -53,7 +54,7 @@ rich = "^14.2.0"
 "ns.backup.route" = 'nightskycam_images.main:backup_route'
 # ns.db.* — Database
 "ns.db.update" = 'nightskycam_images.main:db_update'
-"ns.db.stats" = 'nightskycam_images.main:stats'
+"ns.db.stats" = 'nightskycam_images.main:db_stats'
 "ns.db.web.view" = 'nightskycam_images.main:db_view_webapp'
 # ns.annotate — Annotation CLI
 "ns.annotate" = 'nightskycam_images.annotator.cli:app'

@@ -276,3 +276,57 @@ def test_path_property(populated_db):
     db_path, _ = populated_db
     db = ImageDB(db_path)
     assert db.path == db_path
+
+
+def test_count_with_time_and_cloud_min_and_thumbnail(populated_db):
+    """count() forwards start_time, cloud_cover_min, has_thumbnail kwargs."""
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    # All four fixture images have thumbnails; only one has time >= 21:00:00
+    # and cloud_cover >= 50 (the 21:00 cloudy entry).
+    n = db.count(
+        start_time="21_00_00",
+        end_time="23_59_59",
+        cloud_cover_min=50,
+        has_thumbnail=True,
+    )
+    assert n == 2  # cam1 21:00 (cc=80) and cam2 22:00 (cc=95)
+
+
+def test_image_record_hd_path_fallback_when_format_unknown():
+    """ImageRecord.hd_path scans IMAGE_FILE_FORMATS when image_format is None."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        date_dir = root / "cam1" / "2025_06_15"
+        date_dir.mkdir(parents=True)
+        stem = "cam1_2025_06_15_20_00_00"
+        # Write an HD file but don't tell the record what format it is.
+        img = np.random.randint(0, 255, (40, 40, 3), dtype=np.uint8)
+        cv2.imwrite(str(date_dir / f"{stem}.jpg"), img)
+
+        rec = ImageRecord(
+            filename_stem=stem,
+            system="cam1",
+            date="2025_06_15",
+            time="20_00_00",
+            datetime="2025-06-15T20:00:00",
+            root=str(root),
+            image_format=None,  # forces fallback loop
+        )
+        assert rec.hd_path == date_dir / f"{stem}.jpg"
+
+
+def test_image_record_paths_return_none_when_files_absent():
+    """hd_path/thumbnail_path/toml_path return None when files don't exist."""
+    rec = ImageRecord(
+        filename_stem="cam1_2025_06_15_20_00_00",
+        system="cam1",
+        date="2025_06_15",
+        time="20_00_00",
+        datetime="2025-06-15T20:00:00",
+        root="/nonexistent/root",
+        image_format="jpg",
+    )
+    assert rec.hd_path is None
+    assert rec.thumbnail_path is None
+    assert rec.toml_path is None

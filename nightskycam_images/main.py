@@ -19,9 +19,14 @@ from nightskycam_scorer.model.infer import SkyScorer
 from nightskycam_scorer.utils import to_float_image
 
 from .annotator_webapp import create_app as create_annotator_app
+from .classifier_runner import (
+    classify_image_inplace,
+    load_classifiers,
+    make_populate_enricher,
+)
 from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME, VIDEO_FILE_NAME
 from .convert_npy import to_npy
-from .db import get_default_db_path, populate as db_populate
+from .db import get_default_db_path, get_stats as db_get_stats, populate as db_populate
 from .patches import load_image_and_extract_patches, save_patches_from_folder
 from .stats import generate_stats_report
 from .thumbnail import create_missing_thumbnails, _thumbnail_path
@@ -3405,6 +3410,7 @@ class _ClassifyImagesConfig:
 
     root: Path
     models: Dict[str, Path]  # classifier_name -> model_path
+    second_root: Optional[Path] = None
     systems: Optional[List[str]] = None
     start_date: Optional[dt.date] = None
     end_date: Optional[dt.date] = None
@@ -3414,6 +3420,8 @@ def _classify_images_config_to_dict(config: _ClassifyImagesConfig) -> Dict[str, 
     """Convert a _ClassifyImagesConfig to a dictionary for TOML serialization."""
     result: Dict[str, Any] = {}
     result["root"] = str(config.root)
+    if config.second_root is not None:
+        result["second_root"] = str(config.second_root)
     if config.systems is not None:
         result["systems"] = config.systems
     if config.start_date is not None:
@@ -3447,6 +3455,15 @@ def _parse_classify_images_config(config: Dict[str, Any]) -> _ClassifyImagesConf
     root = Path(config["root"])
     if not root.exists() or not root.is_dir():
         raise ValueError(f"Root directory does not exist: {root}")
+
+    # Optional: second_root
+    second_root: Optional[Path] = None
+    if "second_root" in config and config["second_root"]:
+        second_root = Path(config["second_root"])
+        if not second_root.exists() or not second_root.is_dir():
+            raise ValueError(
+                f"Second root directory does not exist: {second_root}"
+            )
 
     # Required: models
     if "models" not in config:
@@ -3496,6 +3513,7 @@ def _parse_classify_images_config(config: Dict[str, Any]) -> _ClassifyImagesConf
     return _ClassifyImagesConfig(
         root=root,
         models=models,
+        second_root=second_root,
         systems=systems,
         start_date=start_date,
         end_date=end_date,
@@ -3525,6 +3543,18 @@ def classify_images() -> None:
             False,
             "--create-config",
             help="Create a default configuration file named 'nightskycam_classify_images_config.toml' in the current directory.",
+        ),
+        classifier_overwrite: bool = typer.Option(
+            False,
+            "--classifier-overwrite",
+            help=(
+                "Re-run configured classifiers and overwrite their scores in "
+                "each image's TOML, even when those scores already exist. "
+                "By default only classifiers whose names are missing from the "
+                "image's [classifiers] section are computed. Classifier keys "
+                "in the TOML that are not named in the config are preserved "
+                "regardless."
+            ),
         ),
         debug: bool = typer.Option(
             False,
@@ -3568,19 +3598,23 @@ def classify_images() -> None:
             sys.exit(1)
 
         try:
-            # Load and parse config
             logger.info(f"Loading configuration from: {config_path}")
             config = _load_config(config_path)
             parsed = _parse_classify_images_config(config)
 
-            root = parsed.root
+            roots = [parsed.root]
+            if parsed.second_root is not None:
+                roots.append(parsed.second_root)
             model_map = parsed.models
             systems = parsed.systems
             start_date = parsed.start_date
             end_date = parsed.end_date
 
-            logger.info(f"Root directory: {root}")
+            for r in roots:
+                logger.info(f"Root directory: {r}")
             logger.info(f"Models: {', '.join(model_map.keys())}")
+            if classifier_overwrite:
+                logger.info("Overwrite mode: existing classifier scores will be replaced")
             if systems:
                 logger.info(f"Systems filter: {systems}")
             if start_date or end_date:
@@ -3588,144 +3622,125 @@ def classify_images() -> None:
                     f"Date range: {start_date or 'any'} to {end_date or 'any'}"
                 )
 
-            # Load all models
             logger.info(f"Loading {len(model_map)} model(s)...")
-            scorers: Dict[str, SkyScorer] = {}
-            for name, model_path in model_map.items():
-                logger.info(f"  Loading model '{name}': {model_path}")
-                try:
-                    scorers[name] = SkyScorer(str(model_path), validate_size=False)
-                except Exception as e:
-                    logger.error(f"Failed to load model '{name}': {e}")
-                    sys.exit(1)
+            try:
+                scorers = load_classifiers(model_map)
+            except Exception as e:
+                logger.error(f"Failed to load classifiers: {e}")
+                sys.exit(1)
             logger.info("All models loaded successfully")
 
-            # Statistics
             stats = {
-                "total_scanned": 0,
-                "total_with_thumbnails": 0,
-                "total_classified": 0,
-                "total_written": 0,
+                "scanned": 0,
+                "with_thumb_and_toml": 0,
+                "classified": 0,
+                "skipped_existing": 0,
                 "errors": 0,
             }
 
             logger.info("Starting image classification...")
 
-            # Iterate through systems
-            for system_path in walk_systems(root):
-                system_name = system_path.name
+            for root in roots:
+                for system_path in walk_systems(root):
+                    system_name = system_path.name
 
-                if systems is not None and system_name not in systems:
-                    logger.debug(
-                        f"Skipping system (not in filter): {system_name}"
-                    )
-                    continue
-
-                logger.info(f"Processing system: {system_name}")
-
-                for date_, date_path in walk_dates(system_path):
-                    if not _is_within_date_range(date_, start_date, end_date):
-                        logger.debug(f"Skipping date (out of range): {date_}")
+                    if systems is not None and system_name not in systems:
+                        logger.debug(
+                            f"Skipping system (not in filter): {system_name}"
+                        )
                         continue
 
-                    date_str = date_.strftime("%Y_%m_%d")
-                    logger.info(f"  Processing date: {date_str}")
+                    logger.info(f"Processing system: {system_name}")
 
-                    try:
-                        images = get_images(date_path)
-                    except PermissionError as e:
-                        logger.error(f"    Permission denied: {e}")
-                        stats["errors"] += 1
-                        continue
-                    except Exception as e:
-                        logger.error(f"    Error reading date directory: {e}")
-                        stats["errors"] += 1
-                        if debug:
-                            raise
-                        continue
-
-                    if not images:
-                        logger.debug("    No images with thumbnails found")
-                        continue
-
-                    date_classified = 0
-
-                    for image in images:
-                        stats["total_scanned"] += 1
-
-                        # Skip images without thumbnails
-                        thumbnail_path = image.thumbnail
-                        if thumbnail_path is None or not thumbnail_path.exists():
-                            logger.debug(
-                                f"    Skipping (no thumbnail): {image.filename_stem}"
-                            )
+                    for date_, date_path in walk_dates(system_path):
+                        if not _is_within_date_range(date_, start_date, end_date):
+                            logger.debug(f"Skipping date (out of range): {date_}")
                             continue
 
-                        stats["total_with_thumbnails"] += 1
-
-                        # Skip images without TOML metadata files
-                        meta_path = image.meta_path
-                        if meta_path is None:
-                            logger.debug(
-                                f"    Skipping (no TOML): {image.filename_stem}"
-                            )
-                            continue
+                        date_str = date_.strftime("%Y_%m_%d")
+                        logger.info(f"  Processing date: {date_str}")
 
                         try:
-                            # Load thumbnail
-                            thumbnail_array = to_npy(thumbnail_path)
-                            rgb_float = to_float_image(thumbnail_array)
-
-                            # Run all classifiers
-                            classifier_scores: Dict[str, float] = {}
-                            for name, scorer in scorers.items():
-                                result_raw = scorer.predict(rgb_float)
-                                result = (
-                                    result_raw[0]
-                                    if isinstance(result_raw, list)
-                                    else result_raw
-                                )
-                                classifier_scores[name] = float(result.probability)
-                                logger.debug(
-                                    f"      {name}: probability={result.probability:.3f}"
-                                )
-
-                            stats["total_classified"] += 1
-
-                            # Read existing TOML, update classifiers section, write back
-                            with open(meta_path, "rb") as f:
-                                meta_data = tomli.load(f)
-
-                            meta_data["classifiers"] = classifier_scores
-
-                            with open(meta_path, "wb") as f:
-                                tomli_w.dump(meta_data, f)
-
-                            stats["total_written"] += 1
-                            date_classified += 1
-
+                            images = get_images(date_path)
+                        except PermissionError as e:
+                            logger.error(f"    Permission denied: {e}")
+                            stats["errors"] += 1
+                            continue
                         except Exception as e:
-                            logger.error(
-                                f"    Error processing {image.filename_stem}: {e}"
-                            )
+                            logger.error(f"    Error reading date directory: {e}")
                             stats["errors"] += 1
                             if debug:
                                 raise
+                            continue
 
-                    if date_classified > 0:
-                        logger.info(
-                            f"    Classified: {date_classified} images"
-                        )
+                        if not images:
+                            logger.debug("    No images with thumbnails found")
+                            continue
 
-            # Summary
+                        date_classified = 0
+
+                        for image in images:
+                            stats["scanned"] += 1
+
+                            thumbnail_path = image.thumbnail
+                            if thumbnail_path is None or not thumbnail_path.exists():
+                                logger.debug(
+                                    f"    Skipping (no thumbnail): {image.filename_stem}"
+                                )
+                                continue
+
+                            meta_path = image.meta_path
+                            if meta_path is None:
+                                logger.debug(
+                                    f"    Skipping (no TOML): {image.filename_stem}"
+                                )
+                                continue
+
+                            stats["with_thumb_and_toml"] += 1
+
+                            try:
+                                with open(meta_path, "rb") as f:
+                                    meta = tomli.load(f)
+
+                                _, modified = classify_image_inplace(
+                                    thumbnail_path,
+                                    meta_path,
+                                    meta,
+                                    scorers,
+                                    classifier_overwrite,
+                                )
+
+                                if modified:
+                                    stats["classified"] += 1
+                                    date_classified += 1
+                                else:
+                                    stats["skipped_existing"] += 1
+
+                            except Exception as e:
+                                logger.error(
+                                    f"    Error processing {image.filename_stem}: {e}"
+                                )
+                                stats["errors"] += 1
+                                if debug:
+                                    raise
+
+                        if date_classified > 0:
+                            logger.info(
+                                f"    Classified: {date_classified} images"
+                            )
+
             logger.info("")
             logger.info("=== Classification Summary ===")
-            logger.info(f"Total images scanned: {stats['total_scanned']}")
+            logger.info(f"Images scanned: {stats['scanned']}")
             logger.info(
-                f"Images with thumbnails: {stats['total_with_thumbnails']}"
+                f"With thumbnail + TOML: {stats['with_thumb_and_toml']}"
             )
-            logger.info(f"Images classified: {stats['total_classified']}")
-            logger.info(f"TOML files updated: {stats['total_written']}")
+            logger.info(
+                f"Classified (TOML updated): {stats['classified']}"
+            )
+            logger.info(
+                f"Skipped (configured scores already present): {stats['skipped_existing']}"
+            )
             if stats["errors"] > 0:
                 logger.warning(f"Errors encountered: {stats['errors']}")
             logger.info("Done!")
@@ -3782,6 +3797,34 @@ def db_update() -> None:
             "--full",
             help="Force a full rescan of all directories, ignoring last scan timestamp.",
         ),
+        classifier_config: Optional[Path] = typer.Option(
+            None,
+            "--classifier-config",
+            help=(
+                "Optional path to a classifier configuration TOML (same format "
+                "as ns.ml.classify). When set, the listed models are run on each "
+                "image with a thumbnail+TOML before the row is upserted, so the "
+                "DB always reflects the just-written scores. Only the [models] "
+                "section is honored; root/second_root/systems/start_date/end_date "
+                "from the classifier config are ignored — ns.db.update's own "
+                "ROOT [SECOND_ROOT] arguments define the scope."
+            ),
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        classifier_overwrite: bool = typer.Option(
+            False,
+            "--classifier-overwrite",
+            help=(
+                "Only meaningful with --classifier-config. When set, re-run every "
+                "configured classifier and overwrite its score in each image's "
+                "TOML even if a value is already present. Default: only fill "
+                "missing classifier keys; unconfigured keys in [classifiers] are "
+                "preserved either way."
+            ),
+        ),
         debug: bool = typer.Option(
             False,
             "--debug",
@@ -3808,12 +3851,49 @@ def db_update() -> None:
         for r in roots:
             logger.info(f"Root directory: {r}")
         logger.info(f"Database path: {db_path_}")
+
+        # Set up optional classifier enricher.
+        enricher = None
+        enricher_stats = None
+        if classifier_config is not None:
+            try:
+                logger.info(f"Loading classifier config: {classifier_config}")
+                cls_cfg_raw = _load_config(classifier_config)
+                # _parse_classify_images_config requires a valid root; the
+                # classifier-config root is ignored here but must still be
+                # present and valid to reuse the existing parser. If the user's
+                # config root points at a directory that no longer exists, we
+                # fall back to ns.db.update's own root for parsing purposes.
+                if "root" not in cls_cfg_raw or not Path(
+                    str(cls_cfg_raw.get("root", ""))
+                ).is_dir():
+                    cls_cfg_raw["root"] = str(root)
+                cls_cfg = _parse_classify_images_config(cls_cfg_raw)
+                model_map = cls_cfg.models
+                logger.info(
+                    f"Classifier models: {', '.join(model_map.keys())} "
+                    f"(overwrite={classifier_overwrite})"
+                )
+                scorers = load_classifiers(model_map)
+                enricher, enricher_stats = make_populate_enricher(
+                    scorers, classifier_overwrite
+                )
+            except Exception as e:
+                logger.error(f"Failed to set up classifier: {e}")
+                if debug:
+                    raise
+                sys.exit(1)
+        elif classifier_overwrite:
+            logger.warning(
+                "--classifier-overwrite has no effect without --classifier-config"
+            )
+
         logger.info(
             f"Starting database population ({'full' if full else 'incremental'})..."
         )
 
         try:
-            stats = db_populate(roots, db_path_, full=full)
+            stats = db_populate(roots, db_path_, full=full, enricher=enricher)
 
             logger.info("")
             logger.info("=== Database Update Summary ===")
@@ -3824,6 +3904,15 @@ def db_update() -> None:
             logger.info(
                 f"Classifier scores upserted: {stats['classifiers_upserted']}"
             )
+            if enricher_stats is not None:
+                logger.info(
+                    f"Classifier runs (TOMLs rewritten): "
+                    f"{enricher_stats['classifier_writes']}"
+                )
+                if enricher_stats["classifier_errors"] > 0:
+                    logger.warning(
+                        f"Classifier errors: {enricher_stats['classifier_errors']}"
+                    )
             if stats["errors"] > 0:
                 logger.warning(f"Errors: {stats['errors']}")
             logger.info(f"Database: {db_path_}")
@@ -3883,6 +3972,169 @@ def db_view_webapp() -> None:
         logger.info(f"Starting DB viewer on http://{host}:{port}")
         flask_app = create_db_view_app(db_path)
         flask_app.run(host=host, port=port, debug=debug)
+
+    typer_app()
+
+
+# ============================================================================
+# Database Stats Command
+# ============================================================================
+
+
+def db_stats() -> None:
+    """
+    CLI tool to display aggregate statistics from the SQLite metadata database.
+    """
+    import sqlite3
+
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    typer_app = typer.Typer(
+        help="Display aggregate statistics from the image metadata database."
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+    ) -> None:
+        """Print a summary of the contents of the image metadata database."""
+        stats = db_get_stats(db_path)
+        console = Console()
+
+        console.print()
+        console.print(
+            Panel.fit(
+                f"[bold cyan]Total images:[/bold cyan] {stats['total_images']:,}\n"
+                f"[bold cyan]Systems:[/bold cyan] {len(stats['systems'])}\n"
+                f"[bold cyan]Database:[/bold cyan] {db_path}",
+                title="[bold]NightSkyCam DB Statistics[/bold]",
+                border_style="cyan",
+            )
+        )
+        console.print()
+
+        if stats["systems"]:
+            roots = stats.get("roots", [])
+            multi_root = len(roots) > 1
+
+            system_table = Table(
+                title="Images per system",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            system_table.add_column("System", style="cyan", no_wrap=True)
+            system_table.add_column("Images", justify="right", style="green")
+            if multi_root:
+                for root in roots:
+                    # Show only the last path component for readability;
+                    # full paths would blow up the table width.
+                    label = Path(root).name or root
+                    system_table.add_column(
+                        label, justify="right", style="green"
+                    )
+            system_table.add_column("Date range", style="yellow")
+
+            for name, info in sorted(stats["systems"].items()):
+                start, end = info["date_range"]
+                date_range = (
+                    f"{start} to {end}" if start and end else "No images"
+                )
+                row = [name, f"{info['image_count']:,}"]
+                if multi_root:
+                    per_root = info.get("roots", {})
+                    for root in roots:
+                        row.append(f"{per_root.get(root, 0):,}")
+                row.append(date_range)
+                system_table.add_row(*row)
+            console.print(system_table)
+            console.print()
+
+        if stats["weather_distribution"]:
+            weather_table = Table(
+                title="Weather distribution",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            weather_table.add_column("Weather", style="cyan")
+            weather_table.add_column("Count", justify="right", style="green")
+            weather_table.add_column(
+                "Percentage", justify="right", style="yellow"
+            )
+            total = sum(stats["weather_distribution"].values())
+            for weather, count in sorted(
+                stats["weather_distribution"].items(),
+                key=lambda kv: kv[1],
+                reverse=True,
+            ):
+                pct = (count / total * 100) if total else 0
+                weather_table.add_row(weather, f"{count:,}", f"{pct:.1f}%")
+            console.print(weather_table)
+            console.print()
+
+        # Classifier scores — DB-only, not derivable from filesystem walk
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT classifier_name,
+                       COUNT(*)        AS n,
+                       MIN(probability) AS min_p,
+                       AVG(probability) AS avg_p,
+                       MAX(probability) AS max_p
+                FROM classifier_scores
+                GROUP BY classifier_name
+                ORDER BY classifier_name
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if rows:
+            classifier_table = Table(
+                title="Classifier scores",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            classifier_table.add_column("Classifier", style="cyan")
+            classifier_table.add_column("Images", justify="right", style="green")
+            classifier_table.add_column("Min", justify="right")
+            classifier_table.add_column("Avg", justify="right")
+            classifier_table.add_column("Max", justify="right")
+            for row in rows:
+                classifier_table.add_row(
+                    row["classifier_name"],
+                    f"{row['n']:,}",
+                    f"{row['min_p']:.3f}",
+                    f"{row['avg_p']:.3f}",
+                    f"{row['max_p']:.3f}",
+                )
+            console.print(classifier_table)
+            console.print()
+
+        missing = stats["missing_metadata"]
+        missing_table = Table(
+            title="Missing metadata",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        missing_table.add_column("Field", style="cyan")
+        missing_table.add_column("Images missing", justify="right", style="red")
+        missing_table.add_row("TOML file", f"{missing['no_toml']:,}")
+        missing_table.add_row("process", f"{missing['no_process']:,}")
+        missing_table.add_row("weather", f"{missing['no_weather']:,}")
+        missing_table.add_row("cloud_cover", f"{missing['no_cloud_cover']:,}")
+        console.print(missing_table)
+        console.print()
 
     typer_app()
 

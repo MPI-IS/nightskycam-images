@@ -10,7 +10,7 @@ import datetime as dt
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import tomli
 from loguru import logger
@@ -168,6 +168,9 @@ def populate(
     roots: Union[Path, List[Path]],
     db_path: Optional[Path] = None,
     full: bool = False,
+    enricher: Optional[
+        Callable[[Path, Path, Dict[str, Any]], Dict[str, Any]]
+    ] = None,
 ) -> Dict[str, int]:
     """
     Scan the filesystem and populate the database with image metadata.
@@ -194,6 +197,14 @@ def populate(
         ``first_root / '.nightskycam_images.db'``.
     full
         If True, rescan all directories regardless of mtime.
+    enricher
+        Optional per-image callback ``(thumbnail_path, meta_path, meta) ->
+        meta``. Invoked after the TOML has been loaded and before the row is
+        upserted, only when both the thumbnail and TOML exist. The returned
+        dict (which may be the same object mutated in place) is used for the
+        upsert and for the classifier_scores rows. Intended for plugging in
+        the per-image classifier helper from ``classifier_runner.py`` without
+        coupling this module to ``SkyScorer``.
 
     Returns
     -------
@@ -283,6 +294,16 @@ def populate(
 
                         meta = _read_toml_metadata(date_path, stem)
                         has_toml = meta is not None
+
+                        if enricher is not None and meta is not None and has_thumb:
+                            thumb_path = (
+                                date_path
+                                / THUMBNAIL_DIR_NAME
+                                / f"{stem}.{THUMBNAIL_FILE_FORMAT}"
+                            )
+                            meta_path = date_path / f"{stem}.toml"
+                            meta = enricher(thumb_path, meta_path, meta)
+
                         process = meta.get("process") if meta else None
                         weather = meta.get("weather") if meta else None
                         cloud_cover = meta.get("cloud_cover") if meta else None
@@ -631,7 +652,26 @@ def get_stats(db_path: Path) -> Dict[str, Any]:
         systems[row["system"]] = {
             "image_count": row["cnt"],
             "date_range": (row["min_date"], row["max_date"]),
+            "roots": {},
         }
+
+    # Per-(system, root) breakdown — surfaces the split across multi-root setups.
+    for row in conn.execute(
+        """
+        SELECT system, root, COUNT(*) as cnt FROM images
+        GROUP BY system, root
+        """
+    ).fetchall():
+        if row["system"] in systems:
+            systems[row["system"]]["roots"][row["root"]] = row["cnt"]
+
+    # Distinct roots present in the DB (sorted for stable display ordering).
+    roots: List[str] = [
+        r["root"]
+        for r in conn.execute(
+            "SELECT DISTINCT root FROM images ORDER BY root"
+        ).fetchall()
+    ]
 
     # Weather distribution
     weather_dist: Dict[str, int] = {}
@@ -662,6 +702,7 @@ def get_stats(db_path: Path) -> Dict[str, Any]:
     return {
         "total_images": total,
         "systems": systems,
+        "roots": roots,
         "weather_distribution": weather_dist,
         "missing_metadata": {
             "no_toml": no_toml,
