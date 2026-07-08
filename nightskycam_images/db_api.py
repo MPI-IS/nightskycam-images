@@ -28,7 +28,7 @@ from .db import (
     get_dates,
     get_stats,
     get_systems,
-    open_db,
+    open_db_readonly,
     query_images,
 )
 
@@ -341,7 +341,7 @@ class ImageDB:
         Optional[ImageRecord]
             The image record, or None if not found.
         """
-        conn = open_db(self._db_path)
+        conn = open_db_readonly(self._db_path)
         row = conn.execute(
             "SELECT * FROM images WHERE filename_stem = ?",
             (filename_stem,),

@@ -21,7 +21,7 @@ from .db import (
     get_classifier_scores,
     get_dates,
     get_systems,
-    open_db,
+    open_db_readonly,
     query_images,
 )
 
@@ -151,7 +151,7 @@ def create_app(db_path: Path) -> Flask:
         filename_stem: str,
     ) -> Optional[Dict[str, Any]]:
         """Look up an image row by filename_stem."""
-        conn = open_db(app.config["DB_PATH"])
+        conn = open_db_readonly(app.config["DB_PATH"])
         row = conn.execute(
             "SELECT * FROM images WHERE filename_stem = ?",
             (filename_stem,),

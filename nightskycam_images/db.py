@@ -109,6 +109,45 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def open_db_readonly(db_path: Path) -> sqlite3.Connection:
+    """
+    Open a database connection for querying only.
+
+    Unlike ``open_db`` this never writes: no journal-mode switch, no
+    schema creation. ``immutable=1`` lets SQLite open a WAL-mode database
+    from a read-only filesystem (a plain read-only open of a WAL database
+    fails, because readers must create a ``-shm`` file next to it) —
+    e.g. inside the OpenClaw container, where the database directory is
+    a read-only bind mount.
+
+    Trade-off of ``immutable=1``: SQLite skips all locking, so queries on
+    a connection held open across a concurrent ``ns.db.update`` rewrite
+    may fail. Callers here open, query, and close within a single call,
+    so the exposure window is tiny; a failed query can simply be retried.
+
+    Parameters
+    ----------
+    db_path
+        Path to an existing SQLite database file.
+
+    Returns
+    -------
+    sqlite3.Connection
+        Read-only connection with row_factory set to sqlite3.Row.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the database file does not exist (with URI mode SQLite would
+        only report a generic "unable to open database file").
+    """
+    if not Path(db_path).is_file():
+        raise FileNotFoundError(f"database file not found: {db_path}")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def _compute_nightstart_date(datetime_obj: dt.datetime) -> str:
     """Compute nightstart date: if before noon, assign to previous day."""
     if datetime_obj.hour < 12:
@@ -448,7 +487,7 @@ def query_images(
     List[Dict[str, Any]]
         List of matching image rows as dictionaries.
     """
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
 
     clauses: List[str] = []
     params: List[Any] = []
@@ -544,7 +583,7 @@ def get_systems(db_path: Path) -> List[str]:
     List[str]
         Sorted list of system names.
     """
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
     rows = conn.execute(
         "SELECT DISTINCT system FROM images ORDER BY system"
     ).fetchall()
@@ -568,7 +607,7 @@ def get_dates(db_path: Path, system: str) -> List[str]:
     List[str]
         Sorted list of dates in ``YYYY_MM_DD`` format.
     """
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
     rows = conn.execute(
         "SELECT DISTINCT date FROM images WHERE system = ? ORDER BY date",
         (system,),
@@ -579,7 +618,7 @@ def get_dates(db_path: Path, system: str) -> List[str]:
 
 def get_classifier_names(db_path: Path) -> List[str]:
     """Get all distinct classifier names from the database."""
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
     rows = conn.execute(
         "SELECT DISTINCT classifier_name FROM classifier_scores "
         "ORDER BY classifier_name"
@@ -606,7 +645,7 @@ def get_classifier_scores(
     Dict[str, float]
         Mapping of classifier name to probability score.
     """
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
     row = conn.execute(
         "SELECT id FROM images WHERE filename_stem = ?", (filename_stem,)
     ).fetchone()
@@ -636,7 +675,7 @@ def get_stats(db_path: Path) -> Dict[str, Any]:
         Statistics including total_images, per-system counts,
         weather distribution, and missing metadata counts.
     """
-    conn = open_db(db_path)
+    conn = open_db_readonly(db_path)
 
     total = conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()["cnt"]
 
