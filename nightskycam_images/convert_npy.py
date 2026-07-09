@@ -17,10 +17,20 @@ def _bits_reduction(data: npt.NDArray, target: type) -> npt.NDArray:
     return (data * ratio).astype(target)
 
 
-def _to_8bits(image: npt.NDArray) -> npt.NDArray:
+def to_8bits(image: npt.NDArray) -> npt.NDArray:
+    """
+    Return the image converted to 8-bit depth (no-op if already uint8).
+
+    Public API: used by external consumers (e.g. the nightskycam-website
+    package) for display conversion.
+    """
     if image.dtype == np.uint8:
         return image
     return _bits_reduction(image, np.uint8)
+
+
+# Backward-compatible alias for the pre-public name.
+_to_8bits = to_8bits
 
 
 def _random_string(length=8):
@@ -30,7 +40,7 @@ def _random_string(length=8):
 
 
 def npy_array_to_pil(img_array: npt.NDArray) -> PILImage.Image:
-    img_array = _to_8bits(img_array)
+    img_array = to_8bits(img_array)
     with tempfile.TemporaryDirectory() as tmp_dir:
         tiff_file_path = Path(tmp_dir) / f"{_random_string()}.tiff"
         cv2.imwrite(str(tiff_file_path), img_array, [cv2.IMWRITE_TIFF_COMPRESSION, 1])
