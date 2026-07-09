@@ -20,6 +20,8 @@ imageio = "^2.37.2"
 loguru = "^0.7.3"
 typer = "^0.20.0"
 flask = "^3.1.2"
+gunicorn = "^23.0.0"
+openai = "^2.0.0"
 torch = "^2.9.1"
 torchvision = "^0.24.1"
 tifffile = "^2025.10.16"
@@ -55,7 +57,9 @@ rich = "^14.2.0"
 # ns.db.* — Database
 "ns.db.update" = 'nightskycam_images.main:db_update'
 "ns.db.stats" = 'nightskycam_images.main:db_stats'
+"ns.db.locations" = 'nightskycam_images.main:db_locations'
 "ns.db.web.view" = 'nightskycam_images.main:db_view_webapp'
+"ns.db.web.site" = 'nightskycam_images.main:website_webapp'
 # ns.annotate — Annotation CLI
 "ns.annotate" = 'nightskycam_images.annotator.cli:app'
 # ns.util.* — Utilities

@@ -60,12 +60,8 @@ def _create_media_tree(
                 _write_image(date_dir / f"{stem}.{fmt}", fmt)
                 # Thumbnail is always JPEG.
                 thumb = np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8)
-                cv2.imwrite(
-                    str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb
-                )
-                meta = metadata.get(
-                    stem, {"process": "raw", "weather": "clear"}
-                )
+                cv2.imwrite(str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb)
+                meta = metadata.get(stem, {"process": "raw", "weather": "clear"})
                 with open(date_dir / f"{stem}.toml", "wb") as f:
                     tomli_w.dump(meta, f)
 
@@ -253,9 +249,7 @@ def test_images_route_filter_classifier_threshold(app_client):
 def test_images_route_filter_classifier_invalid_ignored(app_client):
     client, _, _ = app_client
     # Empty string and bad float are both skipped.
-    resp = client.get(
-        "/api/images/cam1/2025_06_01?clf_cloudy=&clf_rainy=notafloat"
-    )
+    resp = client.get("/api/images/cam1/2025_06_01?clf_cloudy=&clf_rainy=notafloat")
     assert resp.status_code == 200
     # No classifier filter applied → all three returned.
     assert len(resp.get_json()) == 3

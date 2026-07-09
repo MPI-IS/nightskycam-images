@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Nightskycam — browse{% endblock %}
+{% block content %}
+
+<div class="row g-4">
+    <div class="col-lg-3 col-xl-2">
+        {% include "_filter_form.html" %}
+    </div>
+
+    <div class="col-lg-9 col-xl-10">
+        {% if error %}
+        <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>{{ error }}</div>
+        {% endif %}
+
+        {% if result %}
+        <div class="d-flex align-items-baseline justify-content-between mb-3">
+            <h1 class="h5 mb-0">
+                {{ "{:,}".format(result.total) }} image{{ '' if result.total == 1 else 's' }}
+            </h1>
+            {% if result.total %}
+            <span class="text-secondary small">page {{ result.page }} / {{ result.pages }}</span>
+            {% endif %}
+        </div>
+
+        {% if result.total %}
+        {% include "_grid.html" %}
+        {% include "_pagination.html" %}
+        {% else %}
+        <div class="text-center text-secondary py-5">
+            <i class="bi bi-moon-stars display-4 d-block mb-3"></i>
+            no images match these filters
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='browse.js') }}"></script>
+{% endblock %}

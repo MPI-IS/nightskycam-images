@@ -174,7 +174,9 @@ def create_app(root_dir: Path) -> Flask:
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/images/<system>/<date>")
-    def get_images_route(system: str, date: str) -> Union[Response, Tuple[Response, int]]:
+    def get_images_route(
+        system: str, date: str
+    ) -> Union[Response, Tuple[Response, int]]:
         """Return list of images for a system/date combination."""
         try:
             date_path = app.config["ROOT_DIR"] / system / date
@@ -230,7 +232,9 @@ def create_app(root_dir: Path) -> Flask:
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/thumbnail/<system>/<date>/<filename>")
-    def serve_thumbnail(system: str, date: str, filename: str) -> Union[Response, Tuple[str, int], Tuple[Response, int]]:
+    def serve_thumbnail(
+        system: str, date: str, filename: str
+    ) -> Union[Response, Tuple[str, int], Tuple[Response, int]]:
         """Serve thumbnail image file."""
         try:
             date_path = app.config["ROOT_DIR"] / system / date
@@ -263,7 +267,9 @@ def create_app(root_dir: Path) -> Flask:
             return str(e), 500
 
     @app.route("/api/image/<system>/<date>/<filename>")
-    def serve_image(system: str, date: str, filename: str) -> Union[Response, Tuple[str, int]]:
+    def serve_image(
+        system: str, date: str, filename: str
+    ) -> Union[Response, Tuple[str, int]]:
         """Serve full-size image."""
         try:
             date_path = app.config["ROOT_DIR"] / system / date

@@ -1,0 +1,150 @@
+<form method="get" action="{{ url_for('pages.browse') }}" id="filter-form" class="card filter-card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-funnel me-2"></i>Filters</span>
+        <a class="small link-secondary" href="{{ url_for('pages.browse') }}">reset</a>
+    </div>
+    <div class="card-body vstack gap-3">
+
+        <div>
+            <label class="form-label">Systems</label>
+            <div class="vstack gap-1">
+                {% for system in meta.systems %}
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="systems" value="{{ system }}"
+                           id="sys-{{ system }}"
+                           {% if spec.systems and system in spec.systems %}checked{% endif %}>
+                    <label class="form-check-label" for="sys-{{ system }}">{{ system }}</label>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if meta.locations %}
+        <div>
+            <label class="form-label">Locations</label>
+            <div class="vstack gap-1">
+                {% for location in meta.locations %}
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="locations" value="{{ location }}"
+                           id="loc-{{ location }}"
+                           {% if spec.locations and location in spec.locations %}checked{% endif %}>
+                    <label class="form-check-label" for="loc-{{ location }}">{{ location }}</label>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div>
+            <label class="form-label">Date range</label>
+            <div class="input-group input-group-sm">
+                <input type="date" class="form-control" name="start_date"
+                       min="{{ meta.date_min | replace('_', '-') }}" max="{{ meta.date_max | replace('_', '-') }}"
+                       value="{{ spec.start_date | replace('_', '-') if spec.start_date }}">
+                <span class="input-group-text">&rarr;</span>
+                <input type="date" class="form-control" name="end_date"
+                       min="{{ meta.date_min | replace('_', '-') }}" max="{{ meta.date_max | replace('_', '-') }}"
+                       value="{{ spec.end_date | replace('_', '-') if spec.end_date }}">
+            </div>
+        </div>
+
+        <div>
+            <label class="form-label">Time of night <span class="text-secondary small">(wraps midnight)</span></label>
+            <div class="input-group input-group-sm">
+                <input type="time" class="form-control" name="start_time"
+                       value="{{ spec.start_time[:5] | replace('_', ':') if spec.start_time }}">
+                <span class="input-group-text">&rarr;</span>
+                <input type="time" class="form-control" name="end_time"
+                       value="{{ spec.end_time[:5] | replace('_', ':') if spec.end_time }}">
+            </div>
+        </div>
+
+        <div>
+            <label class="form-label" for="weather-select">Weather</label>
+            <select class="form-select form-select-sm" name="weather" id="weather-select" multiple size="5">
+                {% for weather in meta.weather_values %}
+                <option value="{{ weather }}" {% if spec.weather and weather in spec.weather %}selected{% endif %}>{{ weather }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">ctrl-click for multiple; empty = any</div>
+        </div>
+
+        <div>
+            <label class="form-label">Cloud cover %</label>
+            <div class="input-group input-group-sm">
+                <input type="number" class="form-control" name="cloud_cover_min" min="0" max="100"
+                       placeholder="min" value="{{ spec.cloud_cover_min if spec.cloud_cover_min is not none }}">
+                <span class="input-group-text">&rarr;</span>
+                <input type="number" class="form-control" name="cloud_cover_max" min="0" max="100"
+                       placeholder="max" value="{{ spec.cloud_cover_max if spec.cloud_cover_max is not none }}">
+            </div>
+        </div>
+
+        {% if meta.classifier_names %}
+        <div>
+            <label class="form-label">Classifier score limits</label>
+            {% for name in meta.classifier_names %}
+            {% set current = spec.classifier_max.get(name) if spec.classifier_max else none %}
+            <div class="mb-2">
+                <div class="form-check form-switch">
+                    <input class="form-check-input classifier-toggle" type="checkbox"
+                           id="clf-toggle-{{ name }}" data-slider="clf-{{ name }}"
+                           {% if current is not none %}checked{% endif %}>
+                    <label class="form-check-label" for="clf-toggle-{{ name }}">
+                        {{ name }} &le; <output id="clf-out-{{ name }}">{{ '%.2f' | format(current) if current is not none else '0.50' }}</output>
+                    </label>
+                </div>
+                <input type="range" class="form-range classifier-slider" id="clf-{{ name }}"
+                       name="classifier_max.{{ name }}" min="0" max="1" step="0.05"
+                       data-output="clf-out-{{ name }}"
+                       value="{{ current if current is not none else 0.5 }}"
+                       {% if current is none %}disabled{% endif %}>
+            </div>
+            {% endfor %}
+            <div class="form-text">e.g. cloudy &le; 0.2 keeps images unlikely to be cloudy</div>
+        </div>
+        {% endif %}
+
+        <div class="row g-2">
+            <div class="col-6">
+                <label class="form-label" for="format-select">Format</label>
+                <select class="form-select form-select-sm" name="image_format" id="format-select">
+                    <option value="">any</option>
+                    {% for fmt in meta.image_formats %}
+                    <option value="{{ fmt }}" {% if spec.image_format == fmt %}selected{% endif %}>{{ fmt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6">
+                <label class="form-label" for="stretched-select">Stretched file</label>
+                <select class="form-select form-select-sm" name="stretched" id="stretched-select">
+                    <option value="">any</option>
+                    <option value="1" {% if spec.stretched == true %}selected{% endif %}>yes</option>
+                    <option value="0" {% if spec.stretched == false %}selected{% endif %}>no</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="row g-2">
+            <div class="col-6">
+                <label class="form-label" for="order-select">Order</label>
+                <select class="form-select form-select-sm" name="descending" id="order-select">
+                    <option value="1" {% if spec.descending %}selected{% endif %}>newest first</option>
+                    <option value="0" {% if not spec.descending %}selected{% endif %}>oldest first</option>
+                </select>
+            </div>
+            <div class="col-6">
+                <label class="form-label" for="pagesize-select">Per page</label>
+                <select class="form-select form-select-sm" name="page_size" id="pagesize-select">
+                    {% for size in (24, 60, 120, 200) %}
+                    <option value="{{ size }}" {% if spec.page_size == size %}selected{% endif %}>{{ size }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-info">
+            <i class="bi bi-search me-1"></i>Search
+        </button>
+    </div>
+</form>

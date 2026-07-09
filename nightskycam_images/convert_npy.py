@@ -87,7 +87,9 @@ class Stretch:
             np.save(target_path, array)
             return
         if source_path.suffix == ".tiff":
-            cv2.imwrite(str(target_path), array, params=(cv2.IMWRITE_TIFF_COMPRESSION, 1))
+            cv2.imwrite(
+                str(target_path), array, params=(cv2.IMWRITE_TIFF_COMPRESSION, 1)
+            )
             return
         else:
             cv2.imwrite(str(target_path), array)

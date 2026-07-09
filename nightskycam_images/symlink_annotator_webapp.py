@@ -8,9 +8,9 @@ This module provides a web interface to:
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional
 import secrets
 import shutil
+from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 from loguru import logger
@@ -330,7 +330,10 @@ def create_app(filter_dir: Path, output_dir: Path) -> Flask:
             classification = data["classification"]
 
             if classification not in ["positive", "negative"]:
-                return jsonify({"success": False, "error": "Invalid classification"}), 400
+                return (
+                    jsonify({"success": False, "error": "Invalid classification"}),
+                    400,
+                )
 
             # Get symlink path
             filter_dir = app.config["FILTER_DIR"]
@@ -379,7 +382,10 @@ def create_app(filter_dir: Path, output_dir: Path) -> Flask:
                     }
                 )
             else:
-                return jsonify({"success": False, "error": "Failed to copy thumbnail"}), 500
+                return (
+                    jsonify({"success": False, "error": "Failed to copy thumbnail"}),
+                    500,
+                )
 
         except KeyError as e:
             return jsonify({"success": False, "error": f"Missing field: {e}"}), 400

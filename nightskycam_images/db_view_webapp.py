@@ -10,9 +10,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from PIL import Image as PILImage
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from loguru import logger
-from PIL import Image as PILImage
 import tifffile
 
 from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME
@@ -59,10 +59,7 @@ def create_app(db_path: Path) -> Flask:
     def dates_route(system: str) -> Union[Response, Tuple[Response, int]]:
         try:
             dates = get_dates(app.config["DB_PATH"], system)
-            result = [
-                {"value": d, "display": d.replace("_", "-")}
-                for d in dates
-            ]
+            result = [{"value": d, "display": d.replace("_", "-")} for d in dates]
             return jsonify(result)
         except Exception as e:
             logger.error(f"Error listing dates for {system}: {e}")
@@ -77,9 +74,7 @@ def create_app(db_path: Path) -> Flask:
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/images/<system>/<date>")
-    def images_route(
-        system: str, date: str
-    ) -> Union[Response, Tuple[Response, int]]:
+    def images_route(system: str, date: str) -> Union[Response, Tuple[Response, int]]:
         try:
             # Parse filter query parameters.
             kwargs: Dict[str, Any] = {
@@ -124,9 +119,7 @@ def create_app(db_path: Path) -> Flask:
             for row in rows:
                 stem = row["filename_stem"]
                 fmt = row["image_format"]
-                scores = get_classifier_scores(
-                    app.config["DB_PATH"], stem
-                )
+                scores = get_classifier_scores(app.config["DB_PATH"], stem)
                 entry: Dict[str, Any] = {
                     "filename_stem": stem,
                     "time": row["time"],
@@ -170,9 +163,7 @@ def create_app(db_path: Path) -> Flask:
 
             root = Path(row["root"])
             date_dir = root / row["system"] / row["date"]
-            thumb_path = (
-                date_dir / THUMBNAIL_DIR_NAME / f"{filename_stem}.jpeg"
-            )
+            thumb_path = date_dir / THUMBNAIL_DIR_NAME / f"{filename_stem}.jpeg"
             if not thumb_path.exists():
                 return "Thumbnail not found", 404
 

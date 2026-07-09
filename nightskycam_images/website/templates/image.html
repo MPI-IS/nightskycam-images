@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ record.filename_stem }}{% endblock %}
+{% block content %}
+
+{% set is_jpeg_original = record.image_format in ('jpg', 'jpeg') %}
+{% set default_stretch = 0 if is_jpeg_original else 1 %}
+
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+    <div class="d-flex align-items-center gap-3">
+        {% if nav %}
+        <a class="btn btn-sm btn-outline-secondary"
+           href="{{ url_for('pages.browse') }}?{{ nav.back_query_string }}">
+            <i class="bi bi-grid-3x3-gap me-1"></i>results
+        </a>
+        {% endif %}
+        <h1 class="h6 mb-0 font-monospace">{{ record.filename_stem }}</h1>
+    </div>
+    {% if nav %}
+    <div class="btn-group">
+        <a class="btn btn-sm btn-outline-secondary {% if not nav.prev_stem %}disabled{% endif %}" id="nav-prev"
+           href="{% if nav.prev_stem %}{{ url_for('pages.image_detail', filename_stem=nav.prev_stem) }}?{{ nav.query_string }}{% if nav.query_string %}&amp;{% endif %}i={{ nav.index - 1 }}{% else %}#{% endif %}">
+            <i class="bi bi-chevron-left"></i> prev
+        </a>
+        <a class="btn btn-sm btn-outline-secondary {% if not nav.next_stem %}disabled{% endif %}" id="nav-next"
+           href="{% if nav.next_stem %}{{ url_for('pages.image_detail', filename_stem=nav.next_stem) }}?{{ nav.query_string }}{% if nav.query_string %}&amp;{% endif %}i={{ nav.index + 1 }}{% else %}#{% endif %}">
+            next <i class="bi bi-chevron-right"></i>
+        </a>
+    </div>
+    {% endif %}
+</div>
+
+<div class="row g-4">
+    <div class="col-xl-9">
+        <div class="card">
+            <div class="card-body p-2 text-center position-relative">
+                <div id="image-spinner" class="position-absolute top-50 start-50 translate-middle">
+                    <div class="spinner-border text-info" role="status"><span class="visually-hidden">converting…</span></div>
+                </div>
+                <img id="main-image" class="img-fluid rounded main-image"
+                     data-jpeg-url="{{ url_for('media.jpeg', filename_stem=record.filename_stem) }}"
+                     src="{{ url_for('media.jpeg', filename_stem=record.filename_stem) }}?stretch={{ default_stretch }}"
+                     alt="{{ record.filename_stem }}">
+            </div>
+            <div class="card-footer d-flex justify-content-between flex-wrap gap-2">
+                <div class="btn-group" role="group" aria-label="stretch toggle">
+                    <input type="radio" class="btn-check" name="stretch" id="stretch-on" value="1"
+                           {% if default_stretch == 1 %}checked{% endif %}>
+                    <label class="btn btn-sm btn-outline-info" for="stretch-on">
+                        <i class="bi bi-brightness-high me-1"></i>auto-stretched
+                    </label>
+                    <input type="radio" class="btn-check" name="stretch" id="stretch-off" value="0"
+                           {% if default_stretch == 0 %}checked{% endif %}>
+                    <label class="btn btn-sm btn-outline-info" for="stretch-off">
+                        <i class="bi bi-circle-half me-1"></i>plain conversion
+                    </label>
+                </div>
+                <div class="btn-group">
+                    <a class="btn btn-sm btn-info" href="{{ url_for('media.download', filename_stem=record.filename_stem) }}">
+                        <i class="bi bi-download me-1"></i>original{% if record.image_format %} .{{ record.image_format }}{% endif %}
+                    </a>
+                    <a class="btn btn-sm btn-outline-info" id="download-jpeg"
+                       href="{{ url_for('media.jpeg', filename_stem=record.filename_stem) }}?stretch={{ default_stretch }}"
+                       download="{{ record.filename_stem }}.jpeg">
+                        displayed .jpeg
+                    </a>
+                </div>
+            </div>
+        </div>
+        {% if not is_jpeg_original %}
+        <div class="text-secondary small mt-2">
+            <i class="bi bi-info-circle me-1"></i>
+            displayed as an 8-bit JPEG conversion of the
+            {{ record.image_format or 'original' }} file; download the original for full bit depth.
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="col-xl-3">
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-card-list me-2"></i>Metadata</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0 meta-table">
+                    <tbody>
+                    <tr><th>system</th><td>{{ record.system }}</td></tr>
+                    <tr><th>date</th><td>{{ record.date | replace('_', '-') }}</td></tr>
+                    <tr><th>time</th><td>{{ record.time | replace('_', ':') }}</td></tr>
+                    {% if record.nightstart_date %}
+                    <tr><th>night of</th><td>{{ record.nightstart_date }}</td></tr>
+                    {% endif %}
+                    {% if record.location %}
+                    <tr><th>location</th><td><i class="bi bi-geo-alt me-1"></i>{{ record.location }}</td></tr>
+                    {% endif %}
+                    <tr><th>format</th><td>{{ record.image_format or '?' }}</td></tr>
+                    {% if record.weather %}
+                    <tr><th>weather</th><td class="weather-cell">{{ record.weather | weather_icon | safe }} {{ record.weather }}</td></tr>
+                    {% endif %}
+                    {% if record.cloud_cover is not none %}
+                    <tr><th>cloud cover</th><td>{{ record.cloud_cover }}%</td></tr>
+                    {% endif %}
+                    <tr><th>stretched file</th><td>{{ 'yes' if record.stretched else 'no' }}</td></tr>
+                    {% if record.process %}
+                    <tr><th>process</th><td class="small">{{ record.process }}</td></tr>
+                    {% endif %}
+                    {% for name, score in record.classifier_scores.items() %}
+                    <tr><th>{{ name }}</th><td>{{ '%.3f' | format(score) }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        {% if toml_extras %}
+        {% for section, values in toml_extras.items() %}
+        <div class="card mb-3">
+            <div class="card-header text-capitalize"><i class="bi bi-gear me-2"></i>{{ section }}</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0 meta-table">
+                    <tbody>
+                    {% if values is mapping %}
+                    {% for key, value in values.items() %}
+                    <tr><th>{{ key }}</th><td class="small">{{ value }}</td></tr>
+                    {% endfor %}
+                    {% else %}
+                    <tr><td class="small">{{ values }}</td></tr>
+                    {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='image.js') }}"></script>
+{% endblock %}

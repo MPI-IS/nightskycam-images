@@ -1,22 +1,21 @@
 import argparse
+from dataclasses import asdict, dataclass
 import datetime as dt
 import logging
+from pathlib import Path
 import shutil
 import sys
 import traceback
-from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import imageio.v3 as iio
 from loguru import logger
+from nightskycam_scorer.model.infer import SkyScorer
+from nightskycam_scorer.utils import to_float_image
 import numpy as np
 import tomli
 import tomli_w
 import typer
-
-from nightskycam_scorer.model.infer import SkyScorer
-from nightskycam_scorer.utils import to_float_image
 
 from .annotator_webapp import create_app as create_annotator_app
 from .classifier_runner import (
@@ -26,12 +25,15 @@ from .classifier_runner import (
 )
 from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME, VIDEO_FILE_NAME
 from .convert_npy import to_npy
-from .db import get_default_db_path, get_stats as db_get_stats, populate as db_populate
+from .db import apply_locations, get_default_db_path
+from .db import get_stats as db_get_stats
+from .db import populate as db_populate
+from .db_view_webapp import create_app as create_db_view_app
+from .locations import load_locations
 from .patches import load_image_and_extract_patches, save_patches_from_folder
 from .stats import generate_stats_report
-from .thumbnail import create_missing_thumbnails, _thumbnail_path
+from .thumbnail import _thumbnail_path, create_missing_thumbnails
 from .video import VideoFormat, create_video
-from .db_view_webapp import create_app as create_db_view_app
 from .view_webapp import create_app as create_view_app
 from .walk import (
     _create_symlink_safe,
@@ -45,9 +47,6 @@ from .walk import (
     walk_systems,
     walk_thumbnails,
 )
- 
-
-
 
 # TODO: Move to resp. combine with project-level constant?
 #   @Vincent:
@@ -327,7 +326,9 @@ def save_patches() -> None:
                     overlap=overlap,
                 )
             except Exception as e:
-                logger.exception("Failed to load and extract patches from %s: %s", path, e)
+                logger.exception(
+                    "Failed to load and extract patches from %s: %s", path, e
+                )
                 raise typer.Exit(code=3)
 
             suffix = path.suffix or ".jpg"
@@ -336,7 +337,9 @@ def save_patches() -> None:
             for i, patch in enumerate(patches):
                 out_path = output_dir / f"{stem}_{i}{suffix}"
                 if out_path.exists() and not overwrite:
-                    logger.warning("Skipping existing file (overwrite=False): %s", out_path)
+                    logger.warning(
+                        "Skipping existing file (overwrite=False): %s", out_path
+                    )
                     continue
                 iio.imwrite(out_path, patch)
                 n_saved += 1
@@ -589,9 +592,7 @@ def _parse_config(config: Dict[str, Any]) -> _Config:
 
     if "start_date" in config and config["start_date"]:
         try:
-            start_date = dt.datetime.strptime(
-                config["start_date"], "%Y-%m-%d"
-            ).date()
+            start_date = dt.datetime.strptime(config["start_date"], "%Y-%m-%d").date()
         except ValueError:
             raise ValueError(
                 f"Invalid start_date format '{config['start_date']}'. Expected YYYY-MM-DD."
@@ -599,9 +600,7 @@ def _parse_config(config: Dict[str, Any]) -> _Config:
 
     if "end_date" in config and config["end_date"]:
         try:
-            end_date = dt.datetime.strptime(
-                config["end_date"], "%Y-%m-%d"
-            ).date()
+            end_date = dt.datetime.strptime(config["end_date"], "%Y-%m-%d").date()
         except ValueError:
             raise ValueError(
                 f"Invalid end_date format '{config['end_date']}'. Expected YYYY-MM-DD."
@@ -1418,7 +1417,9 @@ def _cleanup_empty_directories(
 
 def move_to_backup() -> None:
     """CLI entry point for moving filtered images to backup."""
-    app = typer.Typer(help="Move original images to backup based on filter-export symlinks")
+    app = typer.Typer(
+        help="Move original images to backup based on filter-export symlinks"
+    )
 
     @app.command()
     def run(
@@ -1539,12 +1540,18 @@ def move_to_backup() -> None:
                                 logger.warning(f"TOML not found: {original_toml}")
 
                             # Move thumbnail
-                            thumbnail_path = _get_thumbnail_path_from_image(original_image)
+                            thumbnail_path = _get_thumbnail_path_from_image(
+                                original_image
+                            )
                             if thumbnail_path.exists():
                                 # Calculate backup destination for thumbnail preserving structure
-                                relative_thumbnail_path = thumbnail_path.relative_to(original_root)
+                                relative_thumbnail_path = thumbnail_path.relative_to(
+                                    original_root
+                                )
                                 backup_thumbnail = backup_dir / relative_thumbnail_path
-                                _move_file_safe(thumbnail_path, backup_thumbnail, dry_run)
+                                _move_file_safe(
+                                    thumbnail_path, backup_thumbnail, dry_run
+                                )
                                 stats["thumbnails_moved"] += 1
 
                         except Exception as e:
@@ -1573,10 +1580,14 @@ def move_to_backup() -> None:
                 f"Thumbnail folders deleted: {stats.get('thumbnail_folders_deleted', 0)}"
             )
             logger.info(f"Date folders deleted: {stats.get('date_folders_deleted', 0)}")
-            logger.info(f"System folders deleted: {stats.get('system_folders_deleted', 0)}")
+            logger.info(
+                f"System folders deleted: {stats.get('system_folders_deleted', 0)}"
+            )
 
             if dry_run:
-                logger.info("=== DRY-RUN MODE (no files were actually moved/deleted) ===")
+                logger.info(
+                    "=== DRY-RUN MODE (no files were actually moved/deleted) ==="
+                )
 
         except Exception as e:
             logger.error(f"Fatal error: {e}")
@@ -1666,9 +1677,7 @@ def delete_from_other_root() -> None:
             logger.warning("DELETION PREVIEW")
             logger.warning("=" * 70)
             logger.warning(f"Symlinks to process: {preview_stats['symlinks_found']}")
-            logger.warning(
-                f"Images that will be DELETED from {other_root_dir}:"
-            )
+            logger.warning(f"Images that will be DELETED from {other_root_dir}:")
             logger.warning(f"  - HD images: {preview_stats['images_found']}")
             logger.warning(f"  - TOML files: {preview_stats['tomls_found']}")
             logger.warning(f"  - Thumbnails: {preview_stats['thumbnails_found']}")
@@ -1676,7 +1685,9 @@ def delete_from_other_root() -> None:
                 f"Images not found in other root: {preview_stats['not_found']}"
             )
             logger.warning("=" * 70)
-            logger.warning("WARNING: This operation is DESTRUCTIVE and CANNOT BE UNDONE!")
+            logger.warning(
+                "WARNING: This operation is DESTRUCTIVE and CANNOT BE UNDONE!"
+            )
             logger.warning("=" * 70)
 
             # Ask for confirmation unless --yes flag is provided
@@ -1792,7 +1803,9 @@ def _preview_deletion_from_other_root(
                         stats["tomls_found"] += 1
 
                     # Check for thumbnail
-                    other_thumbnail_path = _get_thumbnail_path_from_image(other_image_path)
+                    other_thumbnail_path = _get_thumbnail_path_from_image(
+                        other_image_path
+                    )
                     if other_thumbnail_path.exists():
                         stats["thumbnails_found"] += 1
                 else:
@@ -2072,9 +2085,7 @@ def _parse_scorer_config(config: Dict[str, Any]) -> _ScorerConfig:
 
     if "start_date" in config and config["start_date"]:
         try:
-            start_date = dt.datetime.strptime(
-                config["start_date"], "%Y-%m-%d"
-            ).date()
+            start_date = dt.datetime.strptime(config["start_date"], "%Y-%m-%d").date()
         except ValueError:
             raise ValueError(
                 f"Invalid start_date format '{config['start_date']}'. Expected YYYY-MM-DD."
@@ -2082,9 +2093,7 @@ def _parse_scorer_config(config: Dict[str, Any]) -> _ScorerConfig:
 
     if "end_date" in config and config["end_date"]:
         try:
-            end_date = dt.datetime.strptime(
-                config["end_date"], "%Y-%m-%d"
-            ).date()
+            end_date = dt.datetime.strptime(config["end_date"], "%Y-%m-%d").date()
         except ValueError:
             raise ValueError(
                 f"Invalid end_date format '{config['end_date']}'. Expected YYYY-MM-DD."
@@ -2208,7 +2217,6 @@ def scorer_filter() -> None:
             if start_date or end_date:
                 logger.info(f"Date range: {start_date or 'any'} to {end_date or 'any'}")
 
- 
             # Load the scorer model
             logger.info("Loading classifier model...")
             try:
@@ -2311,7 +2319,11 @@ def scorer_filter() -> None:
                             result_raw = scorer.predict(rgb_float)
 
                             # Handle both single result and list of results
-                            result = result_raw[0] if isinstance(result_raw, list) else result_raw
+                            result = (
+                                result_raw[0]
+                                if isinstance(result_raw, list)
+                                else result_raw
+                            )
 
                             logger.debug(
                                 f"      Prediction: {result.prediction}, "
@@ -2531,7 +2543,9 @@ def _copy_videos_for_dates(
 
     for (system_name, date_str), _ in date_tracking.items():
         # Source video path: root/system/date/thumbnails/day_summary.webm
-        source_video = root / system_name / date_str / THUMBNAIL_DIR_NAME / VIDEO_FILE_NAME
+        source_video = (
+            root / system_name / date_str / THUMBNAIL_DIR_NAME / VIDEO_FILE_NAME
+        )
 
         if not source_video.exists():
             logger.debug(f"No video found for {system_name}/{date_str}")
@@ -2924,10 +2938,10 @@ def scorer_classifier() -> None:
                                 logger.debug(f"    Image: {image.filename_stem}")
                                 for engine in model_engines:
                                     result = engine.should_filter(thumbnail_array)
-                                    logger.debug(
-                                        f"      {engine.model_name}: {result}"
-                                    )
-                                logger.debug(f"      Final decision: {'FILTERED' if is_filtered else 'NOT FILTERED'}")
+                                    logger.debug(f"      {engine.model_name}: {result}")
+                                logger.debug(
+                                    f"      Final decision: {'FILTERED' if is_filtered else 'NOT FILTERED'}"
+                                )
 
                         except Exception as e:
                             logger.error(
@@ -2990,9 +3004,7 @@ def scorer_classifier() -> None:
             logger.info("")
             logger.info("=== Classification Summary ===")
             logger.info(f"Total images scanned: {stats['total_images_scanned']}")
-            logger.info(
-                f"Images with thumbnails: {stats['images_with_thumbnails']}"
-            )
+            logger.info(f"Images with thumbnails: {stats['images_with_thumbnails']}")
             logger.info(
                 f"Images without thumbnails: {stats['images_without_thumbnails']}"
             )
@@ -3214,7 +3226,9 @@ def create_missing_thumbnails_cli() -> None:
 
             if dry_run:
                 logger.info("")
-                logger.info("=== DRY-RUN MODE (no thumbnails were actually created) ===")
+                logger.info(
+                    "=== DRY-RUN MODE (no thumbnails were actually created) ==="
+                )
 
             logger.info("=" * 60)
             logger.info("Operation completed successfully!")
@@ -3303,7 +3317,9 @@ def check_thumbnails():
             total_missing = sum(len(images) for images in missing_by_folder.values())
             typer.echo("Summary:")
             typer.echo(f"  Total date folders checked: {total_folders}")
-            typer.echo(f"  Date folders with missing thumbnails: {len(missing_by_folder)}")
+            typer.echo(
+                f"  Date folders with missing thumbnails: {len(missing_by_folder)}"
+            )
             typer.echo(f"  Total images checked: {total_images}")
             typer.echo(f"  Total missing thumbnails: {total_missing}")
         else:
@@ -3461,9 +3477,7 @@ def _parse_classify_images_config(config: Dict[str, Any]) -> _ClassifyImagesConf
     if "second_root" in config and config["second_root"]:
         second_root = Path(config["second_root"])
         if not second_root.exists() or not second_root.is_dir():
-            raise ValueError(
-                f"Second root directory does not exist: {second_root}"
-            )
+            raise ValueError(f"Second root directory does not exist: {second_root}")
 
     # Required: models
     if "models" not in config:
@@ -3494,9 +3508,7 @@ def _parse_classify_images_config(config: Dict[str, Any]) -> _ClassifyImagesConf
 
     if "start_date" in config and config["start_date"]:
         try:
-            start_date = dt.datetime.strptime(
-                config["start_date"], "%Y-%m-%d"
-            ).date()
+            start_date = dt.datetime.strptime(config["start_date"], "%Y-%m-%d").date()
         except ValueError:
             raise ValueError(
                 f"Invalid start_date format '{config['start_date']}'. Expected YYYY-MM-DD."
@@ -3575,12 +3587,8 @@ def classify_images() -> None:
             default_config = _get_default_classify_images_config()
             config_file_path = Path("nightskycam_classify_images_config.toml")
             if config_file_path.exists():
-                logger.error(
-                    f"Configuration file already exists: {config_file_path}"
-                )
-                logger.info(
-                    "Remove the existing file or specify a different name."
-                )
+                logger.error(f"Configuration file already exists: {config_file_path}")
+                logger.info("Remove the existing file or specify a different name.")
                 sys.exit(1)
             _save_config(default_config, config_file_path)
             logger.info(f"Created default configuration file: {config_file_path}")
@@ -3614,13 +3622,13 @@ def classify_images() -> None:
                 logger.info(f"Root directory: {r}")
             logger.info(f"Models: {', '.join(model_map.keys())}")
             if classifier_overwrite:
-                logger.info("Overwrite mode: existing classifier scores will be replaced")
+                logger.info(
+                    "Overwrite mode: existing classifier scores will be replaced"
+                )
             if systems:
                 logger.info(f"Systems filter: {systems}")
             if start_date or end_date:
-                logger.info(
-                    f"Date range: {start_date or 'any'} to {end_date or 'any'}"
-                )
+                logger.info(f"Date range: {start_date or 'any'} to {end_date or 'any'}")
 
             logger.info(f"Loading {len(model_map)} model(s)...")
             try:
@@ -3645,9 +3653,7 @@ def classify_images() -> None:
                     system_name = system_path.name
 
                     if systems is not None and system_name not in systems:
-                        logger.debug(
-                            f"Skipping system (not in filter): {system_name}"
-                        )
+                        logger.debug(f"Skipping system (not in filter): {system_name}")
                         continue
 
                     logger.info(f"Processing system: {system_name}")
@@ -3725,19 +3731,13 @@ def classify_images() -> None:
                                     raise
 
                         if date_classified > 0:
-                            logger.info(
-                                f"    Classified: {date_classified} images"
-                            )
+                            logger.info(f"    Classified: {date_classified} images")
 
             logger.info("")
             logger.info("=== Classification Summary ===")
             logger.info(f"Images scanned: {stats['scanned']}")
-            logger.info(
-                f"With thumbnail + TOML: {stats['with_thumb_and_toml']}"
-            )
-            logger.info(
-                f"Classified (TOML updated): {stats['classified']}"
-            )
+            logger.info(f"With thumbnail + TOML: {stats['with_thumb_and_toml']}")
+            logger.info(f"Classified (TOML updated): {stats['classified']}")
             logger.info(
                 f"Skipped (configured scores already present): {stats['skipped_existing']}"
             )
@@ -3825,6 +3825,21 @@ def db_update() -> None:
                 "preserved either way."
             ),
         ),
+        locations: Optional[Path] = typer.Option(
+            None,
+            "--locations",
+            help=(
+                "Optional path to a per-system location mapping TOML (see "
+                "ns.db.locations). When set, each upserted image's location "
+                "is filled from the mapping (system + date). Without it, "
+                "locations already stored in the database are preserved "
+                "untouched."
+            ),
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
         debug: bool = typer.Option(
             False,
             "--debug",
@@ -3864,9 +3879,10 @@ def db_update() -> None:
                 # present and valid to reuse the existing parser. If the user's
                 # config root points at a directory that no longer exists, we
                 # fall back to ns.db.update's own root for parsing purposes.
-                if "root" not in cls_cfg_raw or not Path(
-                    str(cls_cfg_raw.get("root", ""))
-                ).is_dir():
+                if (
+                    "root" not in cls_cfg_raw
+                    or not Path(str(cls_cfg_raw.get("root", ""))).is_dir()
+                ):
                     cls_cfg_raw["root"] = str(root)
                 cls_cfg = _parse_classify_images_config(cls_cfg_raw)
                 model_map = cls_cfg.models
@@ -3888,12 +3904,34 @@ def db_update() -> None:
                 "--classifier-overwrite has no effect without --classifier-config"
             )
 
+        # Set up optional location lookup.
+        location_lookup = None
+        if locations is not None:
+            try:
+                logger.info(f"Loading location mapping: {locations}")
+                location_map = load_locations(locations)
+                logger.info(
+                    f"Location mapping systems: " f"{', '.join(location_map.systems)}"
+                )
+                location_lookup = location_map.lookup
+            except Exception as e:
+                logger.error(f"Failed to load location mapping: {e}")
+                if debug:
+                    raise
+                sys.exit(1)
+
         logger.info(
             f"Starting database population ({'full' if full else 'incremental'})..."
         )
 
         try:
-            stats = db_populate(roots, db_path_, full=full, enricher=enricher)
+            stats = db_populate(
+                roots,
+                db_path_,
+                full=full,
+                enricher=enricher,
+                location_lookup=location_lookup,
+            )
 
             logger.info("")
             logger.info("=== Database Update Summary ===")
@@ -3901,9 +3939,7 @@ def db_update() -> None:
             logger.info(f"Folders skipped: {stats['folders_skipped']}")
             logger.info(f"Images scanned: {stats['images_scanned']}")
             logger.info(f"Images upserted: {stats['images_upserted']}")
-            logger.info(
-                f"Classifier scores upserted: {stats['classifiers_upserted']}"
-            )
+            logger.info(f"Classifier scores upserted: {stats['classifiers_upserted']}")
             if enricher_stats is not None:
                 logger.info(
                     f"Classifier runs (TOMLs rewritten): "
@@ -3929,6 +3965,98 @@ def db_update() -> None:
 
 
 # ============================================================================
+# Database Location Backfill (ns.db.locations)
+# ============================================================================
+
+
+def db_locations() -> None:
+    """
+    CLI tool to backfill the images table's location column from a
+    per-system date-range mapping TOML.
+    """
+    typer_app = typer.Typer(
+        help=(
+            "Backfill image locations from a mapping TOML. Locations are "
+            "only ever assigned, never cleared: images outside every "
+            "mapped range keep their current value (usually NULL). Safe "
+            "to re-run; use --dry-run to preview the effect."
+        )
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        mapping: Path = typer.Argument(
+            ...,
+            help=(
+                "Per-system location mapping TOML: [[<system>]] entries "
+                "with start, optional end (omit = ongoing), location and "
+                "an optional note (documentation only)."
+            ),
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False,
+            "--dry-run",
+            help="Compute and report the exact effect, then roll back.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug logging.",
+        ),
+    ) -> None:
+        """Apply the location mapping to all matching images."""
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG" if debug else "INFO")
+
+        try:
+            location_map = load_locations(mapping)
+        except Exception as e:
+            logger.error(f"Invalid location mapping: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+        logger.info(f"Location mapping systems: {', '.join(location_map.systems)}")
+
+        try:
+            result = apply_locations(db_path, location_map, dry_run=dry_run)
+        except Exception as e:
+            logger.error(f"Backfill failed: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+
+        logger.info("")
+        logger.info("=== Location Backfill Summary ===")
+        for location, count in sorted(result["per_location"].items()):
+            logger.info(f"{location}: {count:,} image(s)")
+        logger.info("Per system:")
+        for system, count in sorted(result["per_system"].items()):
+            logger.info(f"  {system}: {count:,}")
+        logger.info(
+            f"Images without location: {result['remaining_null']:,} "
+            f"of {result['total']:,}"
+        )
+        if dry_run:
+            logger.warning("DRY RUN — no changes were committed.")
+        logger.info("Done!")
+        sys.exit(0)
+
+    typer_app()
+
+
+# ============================================================================
 # Database View Web Application
 # ============================================================================
 
@@ -3937,9 +4065,7 @@ def db_view_webapp() -> None:
     """
     CLI tool to start the database-backed image viewer web application.
     """
-    typer_app = typer.Typer(
-        help="Start the DB-backed image viewer web application."
-    )
+    typer_app = typer.Typer(help="Start the DB-backed image viewer web application.")
 
     @typer_app.command()
     def run(
@@ -3972,6 +4098,99 @@ def db_view_webapp() -> None:
         logger.info(f"Starting DB viewer on http://{host}:{port}")
         flask_app = create_db_view_app(db_path)
         flask_app.run(host=host, port=port, debug=debug)
+
+    typer_app()
+
+
+# ============================================================================
+# Website (ns.db.web.site)
+# ============================================================================
+
+
+def website_webapp() -> None:
+    """
+    CLI tool to start the nightskycam image website (query, browse,
+    display and download images backed by the SQLite database).
+    """
+    typer_app = typer.Typer(help="Start the nightskycam image website.")
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        host: str = typer.Option(
+            "0.0.0.0",
+            "--host",
+            help="Host to bind the web server to.",
+        ),
+        port: int = typer.Option(
+            5010,
+            "--port",
+            help="Port to bind the web server to.",
+        ),
+        workers: int = typer.Option(
+            2,
+            "--workers",
+            help="Number of gunicorn worker processes.",
+        ),
+        threads: int = typer.Option(
+            4,
+            "--threads",
+            help="Threads per gunicorn worker.",
+        ),
+        cache_dir: Optional[Path] = typer.Option(
+            None,
+            "--cache-dir",
+            help=(
+                "Directory for cached JPEG conversions "
+                "(default: ~/.cache/nightskycam-website)."
+            ),
+        ),
+        cache_max_mb: int = typer.Option(
+            2048,
+            "--cache-max-mb",
+            help="Approximate size cap of the conversion cache, in MB.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Run the Flask development server in debug mode.",
+        ),
+    ) -> None:
+        """Start the nightskycam image website."""
+        from .website import create_app as create_website_app
+
+        flask_app = create_website_app(
+            db_path, cache_dir=cache_dir, cache_max_mb=cache_max_mb
+        )
+        logger.info(f"Database: {db_path}")
+        logger.info(f"Starting website on http://{host}:{port}")
+
+        if debug:
+            flask_app.run(host=host, port=port, debug=True)
+            return
+
+        from gunicorn.app.base import BaseApplication
+
+        class _Server(BaseApplication):  # type: ignore[misc]
+            def load_config(self) -> None:
+                self.cfg.set("bind", f"{host}:{port}")
+                self.cfg.set("workers", workers)
+                self.cfg.set("threads", threads)
+                # First conversion of a large 16-bit TIFF can take a
+                # while; don't let gunicorn kill the worker mid-request.
+                self.cfg.set("timeout", 120)
+
+            def load(self):  # type: ignore[no-untyped-def]
+                return flask_app
+
+        _Server().run()
 
     typer_app()
 
@@ -4038,16 +4257,12 @@ def db_stats() -> None:
                     # Show only the last path component for readability;
                     # full paths would blow up the table width.
                     label = Path(root).name or root
-                    system_table.add_column(
-                        label, justify="right", style="green"
-                    )
+                    system_table.add_column(label, justify="right", style="green")
             system_table.add_column("Date range", style="yellow")
 
             for name, info in sorted(stats["systems"].items()):
                 start, end = info["date_range"]
-                date_range = (
-                    f"{start} to {end}" if start and end else "No images"
-                )
+                date_range = f"{start} to {end}" if start and end else "No images"
                 row = [name, f"{info['image_count']:,}"]
                 if multi_root:
                     per_root = info.get("roots", {})
@@ -4066,9 +4281,7 @@ def db_stats() -> None:
             )
             weather_table.add_column("Weather", style="cyan")
             weather_table.add_column("Count", justify="right", style="green")
-            weather_table.add_column(
-                "Percentage", justify="right", style="yellow"
-            )
+            weather_table.add_column("Percentage", justify="right", style="yellow")
             total = sum(stats["weather_distribution"].values())
             for weather, count in sorted(
                 stats["weather_distribution"].items(),
@@ -4175,9 +4388,7 @@ def _move_image_files(
         counts[1] = 1
 
     if image.thumbnail and image.thumbnail.exists():
-        shutil.move(
-            str(image.thumbnail), output_thumbnail_dir / image.thumbnail.name
-        )
+        shutil.move(str(image.thumbnail), output_thumbnail_dir / image.thumbnail.name)
         counts[2] = 1
 
     return tuple(counts)
@@ -4354,8 +4565,7 @@ def backup_route() -> None:
                             stats["classified"] += 1
 
                             is_bad = any(
-                                classifier_scores[n] > thresholds[n]
-                                for n in scorers
+                                classifier_scores[n] > thresholds[n] for n in scorers
                             )
 
                             if is_bad:
@@ -4386,9 +4596,7 @@ def backup_route() -> None:
                                 raise
 
                     if date_bad > 0 or date_good > 0:
-                        logger.info(
-                            f"  {date_str}: {date_good} good, {date_bad} bad"
-                        )
+                        logger.info(f"  {date_str}: {date_good} good, {date_bad} bad")
 
         except Exception as e:
             logger.error(f"Fatal error: {e}")
@@ -4399,7 +4607,9 @@ def backup_route() -> None:
         logger.info("")
         logger.info("=== Route Summary ===")
         logger.info(f"Images scanned: {stats['scanned']}")
-        logger.info(f"Already classified (skipped): {stats['skipped_already_classified']}")
+        logger.info(
+            f"Already classified (skipped): {stats['skipped_already_classified']}"
+        )
         logger.info(f"Classified this run: {stats['classified']}")
         logger.info(f"Routed good: {stats['routed_good']}")
         logger.info(f"Routed bad (moved): {stats['routed_bad']}")

@@ -170,7 +170,7 @@ def _setup_image_array(
     np.ndarray
         Numpy array of the result image.
     """
-    
+
     image_array: np.ndarray
 
     # If it is a numpy pickle file.

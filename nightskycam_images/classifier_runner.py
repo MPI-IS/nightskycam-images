@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
 from loguru import logger
-import tomli_w
-
 from nightskycam_scorer.model.infer import SkyScorer
 from nightskycam_scorer.utils import to_float_image
+import tomli_w
 
 from .convert_npy import to_npy
 
@@ -162,9 +161,7 @@ def make_populate_enricher(
                 stats["classifier_writes"] += 1
             return updated_meta
         except Exception as e:
-            logger.error(
-                f"Classifier failed on {thumbnail_path.name}: {e}"
-            )
+            logger.error(f"Classifier failed on {thumbnail_path.name}: {e}")
             stats["classifier_errors"] += 1
             return meta
 

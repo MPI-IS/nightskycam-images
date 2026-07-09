@@ -1,6 +1,6 @@
 import datetime as dt
-import random
 from pathlib import Path
+import random
 from typing import (
     Any,
     Callable,
@@ -28,10 +28,9 @@ from .constants import (
     THUMBNAIL_DIR_NAME,
     THUMBNAIL_FILE_FORMAT,
 )
+from .filters import create_combined_predicate
 from .image import Image
 from .weather import WeatherReport
-
-from .filters import create_combined_predicate
 
 Month = NewType("Month", int)
 Year = NewType("Year", int)
@@ -464,10 +463,14 @@ def get_images(
             if file_path.is_file() and file_path.suffix == f".{THUMBNAIL_FILE_FORMAT}"
         ]
     except PermissionError:
-        logger.warning(f"Permission denied accessing thumbnails directory: {thumbnail_dir_path}")
+        logger.warning(
+            f"Permission denied accessing thumbnails directory: {thumbnail_dir_path}"
+        )
         return []
     except OSError as e:
-        logger.warning(f"OS error accessing thumbnails directory {thumbnail_dir_path}: {e}")
+        logger.warning(
+            f"OS error accessing thumbnails directory {thumbnail_dir_path}: {e}"
+        )
         return []
 
     return [
@@ -733,7 +736,7 @@ def _is_within_time_window(
         return image_time <= end_time
 
     # Both specified - handle time window that crosses midnight
-    if start_time <= end_time:  # type: ignore 
+    if start_time <= end_time:  # type: ignore
         # Normal case: e.g., 08:00 to 20:00
         return start_time <= image_time <= end_time  # type: ignore
     else:
@@ -986,7 +989,6 @@ def filter_and_export_images(
     """
     # Import the filter creation function
 
-
     # Create predicates based on provided filters
     # If individual filter parameters are provided, use them; otherwise use the predicate parameter
     if any(
@@ -1027,7 +1029,9 @@ def filter_and_export_images(
     if folder_step is not None and folder_step > 0:
         # Randomly select starting offset between 0 and folder_step-1
         folder_offset = random.randint(0, folder_step - 1)
-        logger.info(f"Folder step: processing every {folder_step} folder(s), starting at offset {folder_offset}")
+        logger.info(
+            f"Folder step: processing every {folder_step} folder(s), starting at offset {folder_offset}"
+        )
 
     # First pass: count total folders to process for progress tracking
     total_folders = 0
@@ -1076,7 +1080,9 @@ def filter_and_export_images(
                 if (folder_counter - folder_offset) % folder_step != 0:
                     folder_counter += 1
                     skipped_folders += 1
-                    logger.debug(f"Skipping folder (folder_step): {system_name}/{date_.strftime(DATE_FORMAT_FILE)}")
+                    logger.debug(
+                        f"Skipping folder (folder_step): {system_name}/{date_.strftime(DATE_FORMAT_FILE)}"
+                    )
                     continue
                 folder_counter += 1
 
@@ -1242,7 +1248,9 @@ def filter_and_export_images(
                 if nb_images is not None and nb_images > 0:
                     logger.info(f"  Matched {folder_matched} images{skip_msg}")
                 else:
-                    logger.info(f"  Created {folder_symlinks_created} symlinks{skip_msg}")
+                    logger.info(
+                        f"  Created {folder_symlinks_created} symlinks{skip_msg}"
+                    )
             else:
                 # Count total skipped for better reporting
                 total_skipped = (
@@ -1262,10 +1270,14 @@ def filter_and_export_images(
 
     # If nb_images was specified, perform random selection and create symlinks
     if nb_images is not None and nb_images > 0 and matched_images:
-        logger.info(f"Randomly selecting {min(nb_images, len(matched_images))} images from {len(matched_images)} matched images")
+        logger.info(
+            f"Randomly selecting {min(nb_images, len(matched_images))} images from {len(matched_images)} matched images"
+        )
 
         # Randomly select images
-        selected_images = random.sample(matched_images, min(nb_images, len(matched_images)))
+        selected_images = random.sample(
+            matched_images, min(nb_images, len(matched_images))
+        )
 
         # Create symlinks for selected images
         for image_path, toml_path, output_subdir in selected_images:

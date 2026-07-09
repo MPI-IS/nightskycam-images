@@ -7,13 +7,13 @@ is populated by scanning the filesystem and can be refreshed at any time.
 """
 
 import datetime as dt
+from pathlib import Path
 import sqlite3
 import time
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import tomli
 from loguru import logger
+import tomli
 
 from .constants import (
     DATE_FORMAT_FILE,
@@ -21,8 +21,8 @@ from .constants import (
     THUMBNAIL_DIR_NAME,
     THUMBNAIL_FILE_FORMAT,
 )
+from .locations import LocationMap
 from .walk import parse_image_path, walk_dates, walk_systems
-
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS images (
@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS images (
     cloud_cover     INTEGER,
     stretched       INTEGER NOT NULL DEFAULT 0,
     has_thumbnail   INTEGER NOT NULL DEFAULT 0,
-    has_toml        INTEGER NOT NULL DEFAULT 0
+    has_toml        INTEGER NOT NULL DEFAULT 0,
+    location        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS classifier_scores (
@@ -58,6 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_images_system_date     ON images(system, date);
 CREATE INDEX IF NOT EXISTS idx_images_weather         ON images(weather);
 CREATE INDEX IF NOT EXISTS idx_images_cloud_cover     ON images(cloud_cover);
 CREATE INDEX IF NOT EXISTS idx_images_nightstart_date ON images(nightstart_date);
+CREATE INDEX IF NOT EXISTS idx_images_location        ON images(location);
 CREATE INDEX IF NOT EXISTS idx_scores_classifier      ON classifier_scores(classifier_name, probability);
 
 CREATE TABLE IF NOT EXISTS scan_metadata (
@@ -104,9 +106,24 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _migrate_schema(conn)
     conn.executescript(_SCHEMA_SQL)
     conn.commit()
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """
+    Idempotent in-place migration of pre-existing databases.
+
+    Must run before ``_SCHEMA_SQL`` so that indexes on newly added
+    columns can be created. On a fresh database (no ``images`` table
+    yet) this is a no-op; ``_SCHEMA_SQL`` then creates everything.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
+    if columns and "location" not in columns:
+        logger.info("Migrating images table: adding 'location' column")
+        conn.execute("ALTER TABLE images ADD COLUMN location TEXT")
 
 
 def open_db_readonly(db_path: Path) -> sqlite3.Connection:
@@ -169,9 +186,7 @@ def _has_thumbnail(dir_path: Path, filename_stem: str) -> bool:
     return thumb.is_file()
 
 
-def _read_toml_metadata(
-    dir_path: Path, filename_stem: str
-) -> Optional[Dict[str, Any]]:
+def _read_toml_metadata(dir_path: Path, filename_stem: str) -> Optional[Dict[str, Any]]:
     """Read the TOML metadata file for an image. Returns None if missing/unreadable."""
     toml_path = dir_path / f"{filename_stem}.toml"
     if not toml_path.is_file():
@@ -207,9 +222,8 @@ def populate(
     roots: Union[Path, List[Path]],
     db_path: Optional[Path] = None,
     full: bool = False,
-    enricher: Optional[
-        Callable[[Path, Path, Dict[str, Any]], Dict[str, Any]]
-    ] = None,
+    enricher: Optional[Callable[[Path, Path, Dict[str, Any]], Dict[str, Any]]] = None,
+    location_lookup: Optional[Callable[[str, str], Optional[str]]] = None,
 ) -> Dict[str, int]:
     """
     Scan the filesystem and populate the database with image metadata.
@@ -218,7 +232,13 @@ def populate(
     TOML metadata, and upserts into the database. Classifier scores from the
     ``[classifiers]`` TOML section are also stored.
 
-    Safe to run multiple times — uses ``INSERT OR REPLACE`` for idempotency.
+    Safe to run multiple times. The upsert updates rows in place
+    (``ON CONFLICT DO UPDATE``): row ids are stable across rescans and the
+    ``location`` column is preserved when no ``location_lookup`` is given
+    (an existing value is only ever replaced by a non-NULL looked-up
+    value, never cleared). Side effect of the in-place update: classifier
+    scores are no longer cascade-deleted on rescan, so a classifier key
+    *removed* from a TOML keeps its old score row.
 
     In incremental mode (default), date directories whose mtime is older than
     the last scan timestamp are skipped. Use ``full=True`` to force a complete
@@ -244,6 +264,12 @@ def populate(
         upsert and for the classifier_scores rows. Intended for plugging in
         the per-image classifier helper from ``classifier_runner.py`` without
         coupling this module to ``SkyScorer``.
+    location_lookup
+        Optional ``(system, date) -> location`` callable (date in
+        ``YYYY_MM_DD``), e.g. ``LocationMap.lookup`` from
+        ``locations.py``. Applies to every scanned row (unlike
+        ``enricher``, which requires thumbnail + TOML). ``None`` results
+        leave the stored location untouched.
 
     Returns
     -------
@@ -294,6 +320,13 @@ def populate(
                 stats["folders_scanned"] += 1
                 logger.debug(f"  Processing date: {date_str}")
 
+                # Constant within a date folder.
+                location = (
+                    location_lookup(system_name, date_str)
+                    if location_lookup is not None
+                    else None
+                )
+
                 # Discover all image files in this date directory
                 seen_stems = set()
                 for fmt in IMAGE_FILE_FORMATS:
@@ -319,9 +352,7 @@ def populate(
                                 Path(f"{stem}.tmp")
                             )
                         except Exception as e:
-                            logger.debug(
-                                f"    Could not parse filename '{stem}': {e}"
-                            )
+                            logger.debug(f"    Could not parse filename '{stem}': {e}")
                             stats["errors"] += 1
                             continue
 
@@ -346,30 +377,45 @@ def populate(
                         process = meta.get("process") if meta else None
                         weather = meta.get("weather") if meta else None
                         cloud_cover = meta.get("cloud_cover") if meta else None
-                        stretched = (
-                            "stretching" in process if process else False
-                        )
-                        classifiers = (
-                            meta.get("classifiers", {}) if meta else {}
-                        )
+                        stretched = "stretching" in process if process else False
+                        classifiers = meta.get("classifiers", {}) if meta else {}
 
                         # Validate cloud_cover type
-                        if cloud_cover is not None and not isinstance(
-                            cloud_cover, int
-                        ):
+                        if cloud_cover is not None and not isinstance(cloud_cover, int):
                             try:
                                 cloud_cover = int(cloud_cover)
                             except (ValueError, TypeError):
                                 cloud_cover = None
 
+                        # In-place upsert: keeps images.id stable (no
+                        # classifier_scores cascade) and never clears an
+                        # existing location (COALESCE).
                         conn.execute(
                             """
-                            INSERT OR REPLACE INTO images
+                            INSERT INTO images
                                 (root, system, date, time, datetime,
                                  nightstart_date, filename_stem, image_format,
                                  process, weather, cloud_cover, stretched,
-                                 has_thumbnail, has_toml)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 has_thumbnail, has_toml, location)
+                            VALUES
+                                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(filename_stem) DO UPDATE SET
+                                root            = excluded.root,
+                                system          = excluded.system,
+                                date            = excluded.date,
+                                time            = excluded.time,
+                                datetime        = excluded.datetime,
+                                nightstart_date = excluded.nightstart_date,
+                                image_format    = excluded.image_format,
+                                process         = excluded.process,
+                                weather         = excluded.weather,
+                                cloud_cover     = excluded.cloud_cover,
+                                stretched       = excluded.stretched,
+                                has_thumbnail   = excluded.has_thumbnail,
+                                has_toml        = excluded.has_toml,
+                                location        = COALESCE(
+                                    excluded.location, images.location
+                                )
                             """,
                             (
                                 root_str,
@@ -386,6 +432,7 @@ def populate(
                                 int(stretched),
                                 int(has_thumb),
                                 int(has_toml),
+                                location,
                             ),
                         )
                         stats["images_upserted"] += 1
@@ -424,8 +471,17 @@ def populate(
     return stats
 
 
-def query_images(
-    db_path: Path,
+# Whitelist of ORDER BY specifications accepted by query_images. Keys are the
+# public ``order_by`` values; user input never reaches the SQL directly.
+_ORDER_BY_SQL = {
+    ("position", False): "ORDER BY system, date, time",
+    ("position", True): "ORDER BY system DESC, date DESC, time DESC",
+    ("datetime", False): "ORDER BY datetime, id",
+    ("datetime", True): "ORDER BY datetime DESC, id DESC",
+}
+
+
+def _build_image_where(
     systems: Optional[List[str]] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -440,55 +496,13 @@ def query_images(
     has_toml: Optional[bool] = None,
     image_format: Optional[str] = None,
     classifier_max: Optional[Dict[str, float]] = None,
-) -> List[Dict[str, Any]]:
+    locations: Optional[List[str]] = None,
+) -> Tuple[str, List[Any]]:
     """
-    Query images with flexible filtering.
-
-    All filter parameters are optional. When multiple are provided, they are
-    combined with AND logic.
-
-    Parameters
-    ----------
-    db_path
-        Path to the SQLite database file.
-    systems
-        Filter by system names.
-    start_date
-        Inclusive start date in ``YYYY_MM_DD`` format.
-    end_date
-        Inclusive end date in ``YYYY_MM_DD`` format.
-    start_time
-        Start time in ``HH_MM_SS`` format for time-of-day filtering.
-    end_time
-        End time in ``HH_MM_SS`` format for time-of-day filtering.
-        If start_time > end_time, the window is treated as crossing midnight.
-    weather
-        List of weather substrings (OR logic among them).
-    cloud_cover_min
-        Minimum cloud cover (inclusive).
-    cloud_cover_max
-        Maximum cloud cover (inclusive).
-    process_substring
-        Substring that must appear in the process field.
-    stretched
-        If set, filter by whether the image was stretched.
-    has_thumbnail
-        If set, filter by thumbnail presence.
-    has_toml
-        If set, filter by TOML metadata presence.
-    image_format
-        Filter by image format (e.g. ``"jpg"``, ``"tiff"``).
-    classifier_max
-        Dict of ``{classifier_name: max_probability}``. Only images with
-        scores at or below the given thresholds are returned.
-
-    Returns
-    -------
-    List[Dict[str, Any]]
-        List of matching image rows as dictionaries.
+    Build the WHERE clause (including the leading ``" WHERE "``, or an empty
+    string when no filter is set) and its parameter list for the ``images``
+    table. Shared by :func:`query_images` and :func:`count_images`.
     """
-    conn = open_db_readonly(db_path)
-
     clauses: List[str] = []
     params: List[Any] = []
 
@@ -496,6 +510,12 @@ def query_images(
         placeholders = ",".join("?" for _ in systems)
         clauses.append(f"system IN ({placeholders})")
         params.extend(systems)
+
+    if locations is not None:
+        # Rows with unknown (NULL) location never match, by design.
+        placeholders = ",".join("?" for _ in locations)
+        clauses.append(f"location IN ({placeholders})")
+        params.extend(locations)
 
     if start_date is not None:
         clauses.append("date >= ?")
@@ -562,11 +582,213 @@ def query_images(
             params.extend([name, max_val])
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f"SELECT * FROM images{where} ORDER BY system, date, time"
+    return where, params
 
+
+def query_images(
+    db_path: Path,
+    systems: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    weather: Optional[List[str]] = None,
+    cloud_cover_min: Optional[int] = None,
+    cloud_cover_max: Optional[int] = None,
+    process_substring: Optional[str] = None,
+    stretched: Optional[bool] = None,
+    has_thumbnail: Optional[bool] = None,
+    has_toml: Optional[bool] = None,
+    image_format: Optional[str] = None,
+    classifier_max: Optional[Dict[str, float]] = None,
+    locations: Optional[List[str]] = None,
+    order_by: str = "position",
+    descending: bool = False,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Query images with flexible filtering.
+
+    All filter parameters are optional. When multiple are provided, they are
+    combined with AND logic.
+
+    Parameters
+    ----------
+    db_path
+        Path to the SQLite database file.
+    systems
+        Filter by system names.
+    start_date
+        Inclusive start date in ``YYYY_MM_DD`` format.
+    end_date
+        Inclusive end date in ``YYYY_MM_DD`` format.
+    start_time
+        Start time in ``HH_MM_SS`` format for time-of-day filtering.
+    end_time
+        End time in ``HH_MM_SS`` format for time-of-day filtering.
+        If start_time > end_time, the window is treated as crossing midnight.
+    weather
+        List of weather substrings (OR logic among them).
+    cloud_cover_min
+        Minimum cloud cover (inclusive).
+    cloud_cover_max
+        Maximum cloud cover (inclusive).
+    process_substring
+        Substring that must appear in the process field.
+    stretched
+        If set, filter by whether the image was stretched.
+    has_thumbnail
+        If set, filter by thumbnail presence.
+    has_toml
+        If set, filter by TOML metadata presence.
+    image_format
+        Filter by image format (e.g. ``"jpg"``, ``"tiff"``).
+    classifier_max
+        Dict of ``{classifier_name: max_probability}``. Only images with
+        scores at or below the given thresholds are returned.
+    locations
+        Filter by deployment location names (exact match, OR logic).
+        Images with unknown (NULL) location never match.
+    order_by
+        ``"position"`` (default) orders by system, date, time — the historical
+        behavior. ``"datetime"`` orders chronologically across systems.
+    descending
+        Reverse the sort order.
+    limit
+        Maximum number of rows to return.
+    offset
+        Number of rows to skip (only meaningful together with ``limit``).
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of matching image rows as dictionaries.
+    """
+    try:
+        order_sql = _ORDER_BY_SQL[(order_by, bool(descending))]
+    except KeyError:
+        raise ValueError(
+            f"unsupported order_by: {order_by!r} "
+            f"(expected one of: position, datetime)"
+        )
+
+    where, params = _build_image_where(
+        systems=systems,
+        start_date=start_date,
+        end_date=end_date,
+        start_time=start_time,
+        end_time=end_time,
+        weather=weather,
+        cloud_cover_min=cloud_cover_min,
+        cloud_cover_max=cloud_cover_max,
+        process_substring=process_substring,
+        stretched=stretched,
+        has_thumbnail=has_thumbnail,
+        has_toml=has_toml,
+        image_format=image_format,
+        classifier_max=classifier_max,
+        locations=locations,
+    )
+    sql = f"SELECT * FROM images{where} {order_sql}"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+        if offset is not None:
+            sql += " OFFSET ?"
+            params.append(int(offset))
+
+    conn = open_db_readonly(db_path)
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def count_images(
+    db_path: Path,
+    systems: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    weather: Optional[List[str]] = None,
+    cloud_cover_min: Optional[int] = None,
+    cloud_cover_max: Optional[int] = None,
+    process_substring: Optional[str] = None,
+    stretched: Optional[bool] = None,
+    has_thumbnail: Optional[bool] = None,
+    has_toml: Optional[bool] = None,
+    image_format: Optional[str] = None,
+    classifier_max: Optional[Dict[str, float]] = None,
+    locations: Optional[List[str]] = None,
+) -> int:
+    """
+    Count images matching the given filters (same semantics as
+    :func:`query_images`) with a single ``COUNT(*)`` query.
+    """
+    where, params = _build_image_where(
+        systems=systems,
+        start_date=start_date,
+        end_date=end_date,
+        start_time=start_time,
+        end_time=end_time,
+        weather=weather,
+        cloud_cover_min=cloud_cover_min,
+        cloud_cover_max=cloud_cover_max,
+        process_substring=process_substring,
+        stretched=stretched,
+        has_thumbnail=has_thumbnail,
+        has_toml=has_toml,
+        image_format=image_format,
+        classifier_max=classifier_max,
+        locations=locations,
+    )
+    conn = open_db_readonly(db_path)
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM images{where}", params).fetchone()
+    conn.close()
+    return int(row["n"])
+
+
+def get_classifier_scores_for_ids(
+    db_path: Path, image_ids: List[int]
+) -> Dict[int, Dict[str, float]]:
+    """
+    Get classifier scores for many images with a single connection.
+
+    Parameters
+    ----------
+    db_path
+        Path to the SQLite database file.
+    image_ids
+        ``images.id`` values to fetch scores for.
+
+    Returns
+    -------
+    Dict[int, Dict[str, float]]
+        Mapping of image id to ``{classifier_name: probability}``. Images
+        without any score are absent from the result.
+    """
+    scores: Dict[int, Dict[str, float]] = {}
+    if not image_ids:
+        return scores
+    chunk_size = 500  # stay well below SQLite's default variable limit
+    conn = open_db_readonly(db_path)
+    try:
+        for start in range(0, len(image_ids), chunk_size):
+            chunk = image_ids[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                "SELECT image_id, classifier_name, probability "
+                f"FROM classifier_scores WHERE image_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                scores.setdefault(row["image_id"], {})[row["classifier_name"]] = row[
+                    "probability"
+                ]
+    finally:
+        conn.close()
+    return scores
 
 
 def get_systems(db_path: Path) -> List[str]:
@@ -584,9 +806,7 @@ def get_systems(db_path: Path) -> List[str]:
         Sorted list of system names.
     """
     conn = open_db_readonly(db_path)
-    rows = conn.execute(
-        "SELECT DISTINCT system FROM images ORDER BY system"
-    ).fetchall()
+    rows = conn.execute("SELECT DISTINCT system FROM images ORDER BY system").fetchall()
     conn.close()
     return [row["system"] for row in rows]
 
@@ -627,9 +847,7 @@ def get_classifier_names(db_path: Path) -> List[str]:
     return [row["classifier_name"] for row in rows]
 
 
-def get_classifier_scores(
-    db_path: Path, filename_stem: str
-) -> Dict[str, float]:
+def get_classifier_scores(db_path: Path, filename_stem: str) -> Dict[str, float]:
     """
     Get all classifier scores for a single image.
 
@@ -722,6 +940,20 @@ def get_stats(db_path: Path) -> Dict[str, Any]:
     ).fetchall():
         weather_dist[row["weather"]] = row["cnt"]
 
+    # Location distribution ("unknown" = rows outside every mapped range).
+    # Guarded so a not-yet-migrated database read read-only still works.
+    location_dist: Dict[str, int] = {}
+    try:
+        for row in conn.execute(
+            """
+            SELECT COALESCE(location, 'unknown') as loc, COUNT(*) as cnt
+            FROM images GROUP BY loc ORDER BY cnt DESC
+            """
+        ).fetchall():
+            location_dist[row["loc"]] = row["cnt"]
+    except sqlite3.OperationalError:
+        pass
+
     # Missing metadata
     no_toml = conn.execute(
         "SELECT COUNT(*) as cnt FROM images WHERE has_toml = 0"
@@ -743,10 +975,88 @@ def get_stats(db_path: Path) -> Dict[str, Any]:
         "systems": systems,
         "roots": roots,
         "weather_distribution": weather_dist,
+        "location_distribution": location_dist,
         "missing_metadata": {
             "no_toml": no_toml,
             "no_process": no_process,
             "no_weather": no_weather,
             "no_cloud_cover": no_cloud_cover,
         },
+    }
+
+
+def apply_locations(
+    db_path: Path,
+    location_map: LocationMap,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Backfill the ``location`` column from a location mapping.
+
+    Opens the database read-write (which also performs the schema
+    migration adding the column, if needed) and runs one UPDATE per
+    mapped range inside a single transaction. Locations are only ever
+    assigned, never cleared: rows outside every range keep their
+    current value.
+
+    Parameters
+    ----------
+    db_path
+        Path to the SQLite database file.
+    location_map
+        Parsed mapping from :func:`nightskycam_images.locations.load_locations`.
+    dry_run
+        If True, roll back instead of committing; the returned counts
+        are still exact.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``per_location`` and ``per_system`` updated-row counts (note:
+        overlapping same-location ranges count their shared rows once
+        per range), ``remaining_null``, ``total`` and ``dry_run``.
+    """
+    conn = open_db(db_path)
+    per_location: Dict[str, int] = {}
+    per_system: Dict[str, int] = {}
+    try:
+        for system, ranges in location_map.ranges.items():
+            for entry in ranges:
+                if entry.end is None:
+                    cursor = conn.execute(
+                        "UPDATE images SET location = ? "
+                        "WHERE system = ? AND date >= ?",
+                        (entry.location, system, entry.start),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "UPDATE images SET location = ? "
+                        "WHERE system = ? AND date >= ? AND date <= ?",
+                        (entry.location, system, entry.start, entry.end),
+                    )
+                updated = cursor.rowcount
+                per_location[entry.location] = (
+                    per_location.get(entry.location, 0) + updated
+                )
+                per_system[system] = per_system.get(system, 0) + updated
+
+        # Counted in-transaction so dry-run numbers are exact.
+        remaining_null = conn.execute(
+            "SELECT COUNT(*) as cnt FROM images WHERE location IS NULL"
+        ).fetchone()["cnt"]
+        total = conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()["cnt"]
+
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "per_location": per_location,
+        "per_system": per_system,
+        "remaining_null": remaining_null,
+        "total": total,
+        "dry_run": dry_run,
     }

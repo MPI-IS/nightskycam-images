@@ -2,9 +2,9 @@
 Tests for the SQLite database module.
 """
 
+from pathlib import Path
 import sqlite3
 import tempfile
-from pathlib import Path
 from typing import Dict, List
 
 import cv2
@@ -64,9 +64,7 @@ def _create_media_tree(
 
                 # Create thumbnail.
                 thumb = np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8)
-                cv2.imwrite(
-                    str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb
-                )
+                cv2.imwrite(str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb)
 
                 # Create TOML metadata.
                 meta = metadata.get(stem, {"process": "raw", "weather": "clear"})
@@ -163,9 +161,7 @@ def test_populate_basic():
 
         # Verify row content.
         conn = open_db(db_path)
-        rows = conn.execute(
-            "SELECT * FROM images ORDER BY filename_stem"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM images ORDER BY filename_stem").fetchall()
         assert len(rows) == 3
 
         row0 = dict(rows[0])
@@ -207,9 +203,7 @@ def test_populate_idempotent():
         assert stats2["images_upserted"] == 2
 
         conn = open_db(db_path)
-        count = conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()[
-            "cnt"
-        ]
+        count = conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()["cnt"]
         assert count == 2
         conn.close()
 
@@ -254,9 +248,7 @@ def test_populate_no_toml():
         stem = "cam1_2025_06_15_20_00_00"
         img = np.random.randint(0, 255, (50, 50, 3), dtype=np.uint8)
         cv2.imwrite(str(date_dir / f"{stem}.jpg"), img)
-        cv2.imwrite(
-            str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), img
-        )
+        cv2.imwrite(str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), img)
         # No .toml file.
 
         db_path = Path(tmp) / "test.db"
@@ -385,9 +377,7 @@ def test_query_by_multiple_systems(populated_db):
 
 def test_query_by_date_range(populated_db):
     """Filter by date range."""
-    results = query_images(
-        populated_db, start_date="2025_01_10", end_date="2025_01_10"
-    )
+    results = query_images(populated_db, start_date="2025_01_10", end_date="2025_01_10")
     assert len(results) == 3  # 2 from cam1 + 1 from cam2 on that date
 
 
@@ -401,17 +391,13 @@ def test_query_by_start_date_only(populated_db):
 
 def test_query_by_time_window_normal(populated_db):
     """Filter by time window (not crossing midnight)."""
-    results = query_images(
-        populated_db, start_time="19_00_00", end_time="21_00_00"
-    )
+    results = query_images(populated_db, start_time="19_00_00", end_time="21_00_00")
     assert len(results) == 2  # 20:00 and 19:00
 
 
 def test_query_by_time_window_crossing_midnight(populated_db):
     """Filter by time window crossing midnight (e.g., 22:00 to 04:00)."""
-    results = query_images(
-        populated_db, start_time="22_00_00", end_time="04_00_00"
-    )
+    results = query_images(populated_db, start_time="22_00_00", end_time="04_00_00")
     # 22:30, 23:00, 01:00 — all match
     assert len(results) == 3
 
@@ -427,9 +413,7 @@ def test_query_by_weather(populated_db):
 
 def test_query_by_cloud_cover_range(populated_db):
     """Filter by cloud cover range."""
-    results = query_images(
-        populated_db, cloud_cover_min=0, cloud_cover_max=30
-    )
+    results = query_images(populated_db, cloud_cover_min=0, cloud_cover_max=30)
     assert len(results) == 2  # 10 and 5
 
 
@@ -487,17 +471,13 @@ def test_get_dates(populated_db):
 
 def test_get_classifier_scores_found(populated_db):
     """get_classifier_scores returns scores for image with classifiers."""
-    scores = get_classifier_scores(
-        populated_db, "cam2_2025_06_20_23_00_00"
-    )
+    scores = get_classifier_scores(populated_db, "cam2_2025_06_20_23_00_00")
     assert scores == pytest.approx({"quality": 0.92})
 
 
 def test_get_classifier_scores_not_found(populated_db):
     """get_classifier_scores returns empty dict for image without classifiers."""
-    scores = get_classifier_scores(
-        populated_db, "cam1_2025_01_10_20_00_00"
-    )
+    scores = get_classifier_scores(populated_db, "cam1_2025_01_10_20_00_00")
     assert scores == {}
 
 
@@ -535,9 +515,7 @@ def test_get_stats_two_roots_split_breakdown():
 
         # cam1 split across both roots (2 in root1, 1 in root2);
         # cam2 only in root2.
-        _create_media_tree(
-            root1, {"cam1": {"2025_01_10": ["20_00_00", "21_00_00"]}}
-        )
+        _create_media_tree(root1, {"cam1": {"2025_01_10": ["20_00_00", "21_00_00"]}})
         _create_media_tree(
             root2,
             {
@@ -624,9 +602,7 @@ def test_populate_incremental_skips_unchanged():
 
         # The new image was added.
         conn = open_db(db_path)
-        count = conn.execute(
-            "SELECT COUNT(*) as cnt FROM images"
-        ).fetchone()["cnt"]
+        count = conn.execute("SELECT COUNT(*) as cnt FROM images").fetchone()["cnt"]
         assert count == 3
         conn.close()
 
@@ -834,9 +810,7 @@ def test_populate_default_db_path_when_none():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "media"
         root.mkdir()
-        _create_media_tree(
-            root, {"cam1": {"2025_06_15": ["20_00_00"]}}
-        )
+        _create_media_tree(root, {"cam1": {"2025_06_15": ["20_00_00"]}})
 
         populate(root)  # db_path omitted
 
@@ -851,9 +825,7 @@ def test_populate_empty_date_directory():
         empty_date = root / "cam1" / "2025_06_15"
         empty_date.mkdir(parents=True)
         # Also create a populated date so the scan has something to process.
-        _create_media_tree(
-            root, {"cam1": {"2025_06_16": ["20_00_00"]}}
-        )
+        _create_media_tree(root, {"cam1": {"2025_06_16": ["20_00_00"]}})
 
         db_path = Path(tmp) / "test.db"
         stats = populate(root, db_path)
@@ -995,9 +967,7 @@ def test_populate_enricher_meta_changes_reflected_in_db():
 
         populate(root, db_path, enricher=enricher)
 
-        scores = get_classifier_scores(
-            db_path, "cam1_2025_06_15_20_00_00"
-        )
+        scores = get_classifier_scores(db_path, "cam1_2025_06_15_20_00_00")
         assert scores == pytest.approx({"injected": 0.42})
 
 

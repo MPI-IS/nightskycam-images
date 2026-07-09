@@ -2,8 +2,8 @@
 Tests for the db_api module (high-level DB query API).
 """
 
-import tempfile
 from pathlib import Path
+import tempfile
 from typing import Dict, List
 
 import cv2
@@ -37,12 +37,8 @@ def _create_media_tree(
                 img = np.random.randint(0, 255, (50, 50, 3), dtype=np.uint8)
                 cv2.imwrite(str(date_dir / f"{stem}.jpg"), img)
                 thumb = np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8)
-                cv2.imwrite(
-                    str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb
-                )
-                meta = metadata.get(
-                    stem, {"process": "raw", "weather": "clear"}
-                )
+                cv2.imwrite(str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb)
+                meta = metadata.get(stem, {"process": "raw", "weather": "clear"})
                 with open(date_dir / f"{stem}.toml", "wb") as f:
                     tomli_w.dump(meta, f)
 

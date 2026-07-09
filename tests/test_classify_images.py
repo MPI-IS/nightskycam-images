@@ -3,8 +3,8 @@ Tests for the classify-images command and Image.classifiers property.
 """
 
 import datetime as dt
-import tempfile
 from pathlib import Path
+import tempfile
 from typing import Dict
 
 import cv2
@@ -21,12 +21,11 @@ from nightskycam_images.constants import (
 )
 from nightskycam_images.image import Image
 from nightskycam_images.main import (
-    _ClassifyImagesConfig,
     _classify_images_config_to_dict,
+    _ClassifyImagesConfig,
     _get_default_classify_images_config,
     _parse_classify_images_config,
 )
-
 
 # Path to the models directory at the repo root.
 MODELS_DIR = Path(__file__).parent.parent / "models"
@@ -272,9 +271,7 @@ def _create_test_media(
 
         # Create a real JPEG thumbnail.
         thumb = np.random.randint(0, 255, (50, 50, 3), dtype=np.uint8)
-        cv2.imwrite(
-            str(thumbnail_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb
-        )
+        cv2.imwrite(str(thumbnail_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), thumb)
 
         # Create TOML metadata with some existing fields.
         meta = {"process": "auto-stretching", "weather": "clear"}
@@ -283,8 +280,7 @@ def _create_test_media(
 
 
 @pytest.mark.skipif(
-    not (MODELS_DIR / "cloudy.pt").exists()
-    or not (MODELS_DIR / "rainy.pt").exists(),
+    not (MODELS_DIR / "cloudy.pt").exists() or not (MODELS_DIR / "rainy.pt").exists(),
     reason="Model files not found in models/ directory",
 )
 def test_classify_images_end_to_end():
@@ -369,8 +365,7 @@ def test_classify_images_end_to_end():
 
 
 @pytest.mark.skipif(
-    not (MODELS_DIR / "cloudy.pt").exists()
-    or not (MODELS_DIR / "rainy.pt").exists(),
+    not (MODELS_DIR / "cloudy.pt").exists() or not (MODELS_DIR / "rainy.pt").exists(),
     reason="Model files not found in models/ directory",
 )
 def test_classify_images_idempotent():
@@ -556,15 +551,11 @@ def test_classify_image_inplace_fills_all_when_empty():
         assert modified is True
         assert cloudy.calls == 1
         assert rainy.calls == 1
-        assert updated["classifiers"] == pytest.approx(
-            {"cloudy": 0.7, "rainy": 0.2}
-        )
+        assert updated["classifiers"] == pytest.approx({"cloudy": 0.7, "rainy": 0.2})
         # TOML on disk reflects the change.
         with open(meta_path, "rb") as f:
             on_disk = tomli.load(f)
-        assert on_disk["classifiers"] == pytest.approx(
-            {"cloudy": 0.7, "rainy": 0.2}
-        )
+        assert on_disk["classifiers"] == pytest.approx({"cloudy": 0.7, "rainy": 0.2})
         assert on_disk["process"] == "raw"
         assert on_disk["weather"] == "clear"
 
@@ -622,9 +613,7 @@ def test_classify_image_inplace_no_op_when_all_present_no_overwrite():
         assert modified is False
         assert cloudy.calls == 0
         assert rainy.calls == 0
-        assert updated["classifiers"] == pytest.approx(
-            {"cloudy": 0.5, "rainy": 0.6}
-        )
+        assert updated["classifiers"] == pytest.approx({"cloudy": 0.5, "rainy": 0.6})
         # TOML was not rewritten.
         assert meta_path.stat().st_mtime_ns == mtime_before
 
@@ -651,9 +640,7 @@ def test_classify_image_inplace_overwrites_all_when_overwrite():
         assert modified is True
         assert cloudy.calls == 1
         assert rainy.calls == 1
-        assert updated["classifiers"] == pytest.approx(
-            {"cloudy": 0.1, "rainy": 0.2}
-        )
+        assert updated["classifiers"] == pytest.approx({"cloudy": 0.1, "rainy": 0.2})
 
 
 def test_classify_image_inplace_preserves_unconfigured_keys():
@@ -686,9 +673,7 @@ def test_make_populate_enricher_tracks_stats():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
-        thumb, meta_path, _ = _make_one_image(
-            tmp, {"process": "raw"}
-        )
+        thumb, meta_path, _ = _make_one_image(tmp, {"process": "raw"})
         cloudy = _FakeScorer(0.8)
         scorers = {"cloudy": cloudy}
 

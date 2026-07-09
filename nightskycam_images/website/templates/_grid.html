@@ -1,0 +1,35 @@
+{% set base_qs = spec.to_query_string() %}
+<div class="row g-3">
+    {% for record in result.records %}
+    {% set index = (result.page - 1) * result.page_size + loop.index0 %}
+    <div class="col-6 col-md-4 col-lg-3 col-xxl-2">
+        <a class="card thumb-card h-100"
+           href="{{ url_for('pages.image_detail', filename_stem=record.filename_stem) }}?{{ base_qs }}{% if base_qs %}&amp;{% endif %}i={{ index }}">
+            <div class="thumb-wrap">
+                <img loading="lazy" alt="{{ record.filename_stem }}"
+                     src="{{ url_for('media.thumb', filename_stem=record.filename_stem) }}">
+            </div>
+            <div class="card-body p-2 small">
+                <div class="d-flex justify-content-between align-items-center">
+                    <span class="text-info">{{ record.system }}</span>
+                    <span class="weather-cell">{{ record.weather | weather_icon | safe }}</span>
+                </div>
+                <div class="text-secondary">
+                    {{ record.date | replace('_', '-') }} {{ record.time | replace('_', ':') }}
+                </div>
+                <div class="d-flex gap-1 mt-1 flex-wrap">
+                    {% if record.image_format %}
+                    <span class="badge text-bg-dark border">{{ record.image_format }}</span>
+                    {% endif %}
+                    {% if record.cloud_cover is not none %}
+                    <span class="badge text-bg-dark border"><i class="bi bi-cloud me-1"></i>{{ record.cloud_cover }}%</span>
+                    {% endif %}
+                    {% for name, score in record.classifier_scores.items() %}
+                    <span class="badge text-bg-dark border">{{ name }} {{ '%.2f' | format(score) }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endfor %}
+</div>

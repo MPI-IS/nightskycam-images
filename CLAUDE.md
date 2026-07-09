@@ -56,7 +56,9 @@ coverage run -m pytest && coverage report
 Key modules:
 - `walk.py` — filesystem traversal: iterates systems, dates, images; core filtering logic (`filter_and_export_images`); symlink creation for filtered exports
 - `main.py` — Typer CLI entry points, wires together other modules
-- `db.py` / `db_api.py` — SQLite metadata cache and query API
+- `db.py` / `db_api.py` — SQLite metadata cache and query API. The upsert is `ON CONFLICT DO UPDATE` (stable row ids; the `location` column is preserved unless a lookup supplies a value). `open_db()` migrates old DBs in place (column probe + `ALTER TABLE`).
+- `locations.py` — per-system deployment-location mapping (date ranges → site name); consumed by `ns.db.locations` and `ns.db.update --locations`
+- `website/` — the production Flask website (`ns.db.web.site`): FilterSpec-based query API, media conversion with disk cache, and the LLM agent (`agent.py`) behind the "Ask" page
 - `filters.py` — predicate-based filtering (process, cloud cover, weather fields from TOML metadata)
 - `image.py` — `Image` class holding paths and metadata for a single capture
 - `thumbnail.py` — thumbnail generation with parallel processing
@@ -88,7 +90,7 @@ Defined in `pyproject.toml` under `[tool.poetry.scripts]`. Commands follow a `ns
 - `ns.filter.*` — `export` (creates symlinks from a TOML config), `copy` (retargets symlinks to a new root), `scorer` (filter via trained classifier)
 - `ns.ml.*` — `classify`, `scorer`, `train` (latter lives in `nightskycam_images.classifier`)
 - `ns.backup.*` — backup pipeline routing
-- `ns.db.*` — `update` (rebuild/refresh SQLite mirror; optional inline classifier pass), `stats` (DB-derived summary incl. classifier scores), `web.view`
+- `ns.db.*` — `update` (rebuild/refresh SQLite mirror; optional inline classifier pass via `--classifier-config` and location fill via `--locations`), `stats` (DB-derived summary incl. classifier scores), `locations` (backfill the `images.location` column from a per-system date-range mapping TOML; `--dry-run` supported; never clears existing values), `web.view` (legacy prototype), `web.site` (the production website: browse/filter UI, stats dashboard, on-the-fly TIFF/npy→JPEG conversion with auto-stretch, JSON API, optional LLM "Ask" agent when `SAIA_API_KEY` is set; runs gunicorn)
 - `ns.annotate` — annotation CLI (`nightskycam_images.annotator.cli`)
 - `ns.util.*` — utilities (e.g., `patches`)
 
