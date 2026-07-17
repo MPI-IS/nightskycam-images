@@ -7,10 +7,12 @@ is populated by scanning the filesystem and can be refreshed at any time.
 """
 
 import datetime as dt
+import os
 from pathlib import Path
+import re
 import sqlite3
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from loguru import logger
 import tomli
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS classifier_scores (
 CREATE INDEX IF NOT EXISTS idx_images_system          ON images(system);
 CREATE INDEX IF NOT EXISTS idx_images_date            ON images(date);
 CREATE INDEX IF NOT EXISTS idx_images_datetime        ON images(datetime);
+CREATE INDEX IF NOT EXISTS idx_images_datetime_id      ON images(datetime, id);
 CREATE INDEX IF NOT EXISTS idx_images_system_date     ON images(system, date);
 CREATE INDEX IF NOT EXISTS idx_images_weather         ON images(weather);
 CREATE INDEX IF NOT EXISTS idx_images_cloud_cover     ON images(cloud_cover);
@@ -84,6 +87,76 @@ def get_default_db_path(root: Path) -> Path:
         Default database file path: ``root / '.nightskycam_images.db'``.
     """
     return root / ".nightskycam_images.db"
+
+
+def _score_column(classifier_name: str) -> str:
+    """
+    Column name on ``images`` mirroring a classifier's probability.
+
+    The scores live in the ``classifier_scores`` table (one row per image
+    per classifier), which makes filtering require a subquery. We also
+    denormalize each classifier's probability into an indexed
+    ``score_<name>`` column on ``images`` so range filters become plain
+    indexed comparisons — as fast as ``cloud_cover``. The name is
+    sanitized to a safe SQL identifier so it can be interpolated directly.
+    """
+    safe = re.sub(r"[^a-z0-9_]+", "_", classifier_name.strip().lower()).strip("_")
+    return f"score_{safe or 'unknown'}"
+
+
+def _existing_score_columns(conn: sqlite3.Connection) -> Set[str]:
+    """The ``score_*`` columns currently present on the ``images`` table."""
+    return {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(images)")
+        if str(row[1]).startswith("score_")
+    }
+
+
+def _ensure_score_columns(
+    conn: sqlite3.Connection, classifier_names: Any, known: Set[str]
+) -> List[Tuple[str, str]]:
+    """
+    Ensure an indexed ``score_<name>`` column exists for each classifier
+    name. ``known`` is a set of already-present score columns, updated in
+    place to avoid repeated ``PRAGMA`` probes. Returns the ``(column,
+    name)`` pairs that were newly added (so the caller can backfill them).
+    """
+    added: List[Tuple[str, str]] = []
+    for name in classifier_names:
+        column = _score_column(name)
+        if column in known:
+            continue
+        conn.execute(f"ALTER TABLE images ADD COLUMN {column} REAL")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_images_{column} ON images({column})"
+        )
+        known.add(column)
+        added.append((column, name))
+    return added
+
+
+def _sync_score_columns(
+    conn: sqlite3.Connection,
+    image_id: int,
+    classifiers: Dict[str, Any],
+    known: Set[str],
+) -> None:
+    """
+    Write one image's classifier scores into its denormalized
+    ``score_<name>`` columns, creating (and indexing) any missing column
+    first. ``known`` tracks the existing score columns across calls.
+    """
+    if not classifiers:
+        return
+    _ensure_score_columns(conn, classifiers.keys(), known)
+    items = list(classifiers.items())
+    set_clause = ", ".join(f"{_score_column(name)} = ?" for name, _ in items)
+    values = [float(prob) for _, prob in items]
+    conn.execute(
+        f"UPDATE images SET {set_clause} WHERE id = ?",
+        values + [image_id],
+    )
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
@@ -121,9 +194,29 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     yet) this is a no-op; ``_SCHEMA_SQL`` then creates everything.
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
-    if columns and "location" not in columns:
+    if not columns:
+        return  # fresh database; _SCHEMA_SQL creates everything
+    if "location" not in columns:
         logger.info("Migrating images table: adding 'location' column")
         conn.execute("ALTER TABLE images ADD COLUMN location TEXT")
+
+    # Denormalized per-classifier score columns: add + backfill any that
+    # are missing for classifiers already present in classifier_scores.
+    known = {str(c) for c in columns if str(c).startswith("score_")}
+    names = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT DISTINCT classifier_name FROM classifier_scores"
+        )
+    ]
+    for column, name in _ensure_score_columns(conn, names, known):
+        logger.info(f"Migrating images table: adding + backfilling '{column}'")
+        conn.execute(
+            f"UPDATE images SET {column} = ("
+            "SELECT probability FROM classifier_scores cs "
+            "WHERE cs.image_id = images.id AND cs.classifier_name = ?)",
+            (name,),
+        )
 
 
 def open_db_readonly(db_path: Path) -> sqlite3.Connection:
@@ -158,10 +251,27 @@ def open_db_readonly(db_path: Path) -> sqlite3.Connection:
         If the database file does not exist (with URI mode SQLite would
         only report a generic "unable to open database file").
     """
-    if not Path(db_path).is_file():
+    db_path = Path(db_path)
+    if not db_path.is_file():
         raise FileNotFoundError(f"database file not found: {db_path}")
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+
+    # A WAL reader must create -wal/-shm sidecar files next to the DB. When
+    # the directory is writable (the website's data dir, where ns.db.update
+    # writes concurrently every hour), open plain mode=ro so the reader
+    # participates in WAL and always sees a consistent snapshot — avoiding
+    # the torn reads that immutable=1 (which skips locking) risks against a
+    # live writer. When the directory is read-only (the gateway's bind
+    # mount, where the sidecars can't be created), fall back to immutable=1.
+    if os.access(db_path.parent, os.W_OK):
+        uri = f"file:{db_path}?mode=ro"
+    else:
+        uri = f"file:{db_path}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
+    # Read-side performance: memory-map the file and keep a modest page
+    # cache so repeated scans don't re-read from cold.
+    conn.execute("PRAGMA mmap_size=268435456")  # 256 MiB
+    conn.execute("PRAGMA cache_size=-16000")  # ~16 MiB
     return conn
 
 
@@ -286,6 +396,7 @@ def populate(
         db_path = get_default_db_path(root_list[0])
 
     conn = open_db(db_path)
+    known_score_columns = _existing_score_columns(conn)
 
     stats = {
         "images_scanned": 0,
@@ -465,8 +576,20 @@ def populate(
                                             f"score '{name}' for '{stem}': {e}"
                                         )
                                         stats["errors"] += 1
+                                # Mirror the scores into denormalized,
+                                # indexed score_<name> columns (adding any
+                                # new column on the fly) so range filters
+                                # stay fast.
+                                _sync_score_columns(
+                                    conn, image_id, classifiers, known_score_columns
+                                )
 
-    _set_last_scan_timestamp(conn)
+    _set_last_scan_timestamp(conn)  # commits the scan
+    # Refresh planner statistics (only where needed) and fold the WAL back
+    # into the main file so readers and backups see an up-to-date, compact
+    # database after each hourly run.
+    conn.execute("PRAGMA optimize")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
     return stats
 
@@ -496,13 +619,20 @@ def _build_image_where(
     has_toml: Optional[bool] = None,
     image_format: Optional[str] = None,
     classifier_max: Optional[Dict[str, float]] = None,
+    classifier_min: Optional[Dict[str, float]] = None,
     locations: Optional[List[str]] = None,
+    score_columns: Optional[Set[str]] = None,
 ) -> Tuple[str, List[Any]]:
     """
     Build the WHERE clause (including the leading ``" WHERE "``, or an empty
     string when no filter is set) and its parameter list for the ``images``
     table. Shared by :func:`query_images` and :func:`count_images`.
+
+    ``score_columns`` is the set of denormalized ``score_<name>`` columns
+    present on the table; classifier bounds use the fast indexed column when
+    available and fall back to a ``classifier_scores`` subquery otherwise.
     """
+    available = score_columns or set()
     clauses: List[str] = []
     params: List[Any] = []
 
@@ -575,11 +705,29 @@ def _build_image_where(
 
     if classifier_max is not None:
         for name, max_val in classifier_max.items():
-            clauses.append(
-                "id IN (SELECT image_id FROM classifier_scores "
-                "WHERE classifier_name = ? AND probability <= ?)"
-            )
-            params.extend([name, max_val])
+            column = _score_column(name)
+            if column in available:
+                clauses.append(f"{column} <= ?")
+                params.append(max_val)
+            else:
+                clauses.append(
+                    "id IN (SELECT image_id FROM classifier_scores "
+                    "WHERE classifier_name = ? AND probability <= ?)"
+                )
+                params.extend([name, max_val])
+
+    if classifier_min is not None:
+        for name, min_val in classifier_min.items():
+            column = _score_column(name)
+            if column in available:
+                clauses.append(f"{column} >= ?")
+                params.append(min_val)
+            else:
+                clauses.append(
+                    "id IN (SELECT image_id FROM classifier_scores "
+                    "WHERE classifier_name = ? AND probability >= ?)"
+                )
+                params.extend([name, min_val])
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
@@ -601,6 +749,7 @@ def query_images(
     has_toml: Optional[bool] = None,
     image_format: Optional[str] = None,
     classifier_max: Optional[Dict[str, float]] = None,
+    classifier_min: Optional[Dict[str, float]] = None,
     locations: Optional[List[str]] = None,
     order_by: str = "position",
     descending: bool = False,
@@ -673,6 +822,7 @@ def query_images(
             f"(expected one of: position, datetime)"
         )
 
+    conn = open_db_readonly(db_path)
     where, params = _build_image_where(
         systems=systems,
         start_date=start_date,
@@ -688,7 +838,9 @@ def query_images(
         has_toml=has_toml,
         image_format=image_format,
         classifier_max=classifier_max,
+        classifier_min=classifier_min,
         locations=locations,
+        score_columns=_existing_score_columns(conn),
     )
     sql = f"SELECT * FROM images{where} {order_sql}"
     if limit is not None:
@@ -698,7 +850,6 @@ def query_images(
             sql += " OFFSET ?"
             params.append(int(offset))
 
-    conn = open_db_readonly(db_path)
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -720,12 +871,14 @@ def count_images(
     has_toml: Optional[bool] = None,
     image_format: Optional[str] = None,
     classifier_max: Optional[Dict[str, float]] = None,
+    classifier_min: Optional[Dict[str, float]] = None,
     locations: Optional[List[str]] = None,
 ) -> int:
     """
     Count images matching the given filters (same semantics as
     :func:`query_images`) with a single ``COUNT(*)`` query.
     """
+    conn = open_db_readonly(db_path)
     where, params = _build_image_where(
         systems=systems,
         start_date=start_date,
@@ -741,9 +894,10 @@ def count_images(
         has_toml=has_toml,
         image_format=image_format,
         classifier_max=classifier_max,
+        classifier_min=classifier_min,
         locations=locations,
+        score_columns=_existing_score_columns(conn),
     )
-    conn = open_db_readonly(db_path)
     row = conn.execute(f"SELECT COUNT(*) AS n FROM images{where}", params).fetchone()
     conn.close()
     return int(row["n"])

@@ -913,6 +913,94 @@ def test_query_classifier_max(populated_db):
     assert results_none == []
 
 
+def test_query_classifier_min(populated_db):
+    """Filter by classifier_min threshold."""
+    results = query_images(populated_db, classifier_min={"quality": 0.5})
+    assert len(results) == 1
+    assert results[0]["filename_stem"] == "cam2_2025_06_20_23_00_00"
+
+    results_none = query_images(populated_db, classifier_min={"quality": 0.95})
+    assert results_none == []
+
+
+def test_query_classifier_range(populated_db):
+    """Filter by a classifier score range (min and max together)."""
+    results = query_images(
+        populated_db,
+        classifier_min={"quality": 0.9},
+        classifier_max={"quality": 0.95},
+    )
+    assert len(results) == 1
+    assert results[0]["filename_stem"] == "cam2_2025_06_20_23_00_00"
+
+    empty = query_images(
+        populated_db,
+        classifier_min={"quality": 0.95},
+        classifier_max={"quality": 0.99},
+    )
+    assert empty == []
+
+
+def test_score_columns_denormalized(populated_db):
+    """populate mirrors classifier scores into indexed score_<name>
+    columns on the images table."""
+    conn = sqlite3.connect(populated_db)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
+    assert "score_quality" in cols
+    # The one scored image has its probability in the column...
+    row = conn.execute(
+        "SELECT score_quality FROM images "
+        "WHERE filename_stem = 'cam2_2025_06_20_23_00_00'"
+    ).fetchone()
+    assert row[0] == pytest.approx(0.92)
+    # ...unscored images are NULL...
+    (nulls,) = conn.execute(
+        "SELECT COUNT(*) FROM images WHERE score_quality IS NULL"
+    ).fetchone()
+    assert nulls == 4
+    # ...an index backs the column...
+    idx = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert "idx_images_score_quality" in idx
+    # ...and the filter uses that index rather than a classifier_scores scan.
+    plan = "\n".join(
+        str(r)
+        for r in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM images WHERE score_quality >= ?",
+            (0.5,),
+        )
+    )
+    assert "idx_images_score_quality" in plan
+    assert "classifier_scores" not in plan
+    conn.close()
+
+
+def test_migration_backfills_score_columns(populated_db):
+    """Opening a pre-0.2.0 database (classifier_scores present, no score
+    columns) adds and backfills the denormalized columns."""
+    # Simulate the old schema: drop the score index, then the column.
+    conn = sqlite3.connect(populated_db)
+    conn.execute("DROP INDEX idx_images_score_quality")
+    conn.execute("ALTER TABLE images DROP COLUMN score_quality")
+    conn.commit()
+    conn.close()
+
+    # open_db runs the migration.
+    conn = open_db(populated_db)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
+    assert "score_quality" in cols
+    row = conn.execute(
+        "SELECT score_quality FROM images "
+        "WHERE filename_stem = 'cam2_2025_06_20_23_00_00'"
+    ).fetchone()
+    assert row["score_quality"] == pytest.approx(0.92)
+    conn.close()
+
+
 # ============================================================================
 # populate(enricher=...) tests
 # ============================================================================

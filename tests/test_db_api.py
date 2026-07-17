@@ -183,6 +183,26 @@ def test_images_filter_classifier_max(populated_db):
     assert low_cloudy[0].classifier_scores["cloudy"] <= 0.5
 
 
+def test_images_filter_classifier_min(populated_db):
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    high_cloudy = db.images(classifier_min={"cloudy": 0.5})
+    assert len(high_cloudy) == 2  # cloudy 0.8 and 0.9
+    assert all(img.classifier_scores["cloudy"] >= 0.5 for img in high_cloudy)
+
+
+def test_images_filter_classifier_range(populated_db):
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    # A range keeps only scores between the two bounds (inclusive).
+    mid = db.images(classifier_min={"cloudy": 0.85}, classifier_max={"cloudy": 0.95})
+    assert len(mid) == 1  # only cloudy 0.9
+    assert mid[0].classifier_scores["cloudy"] == pytest.approx(0.9)
+    # An inverted range (min > max) matches nothing.
+    empty = db.images(classifier_min={"cloudy": 0.9}, classifier_max={"cloudy": 0.1})
+    assert empty == []
+
+
 def test_images_filter_format(populated_db):
     db_path, _ = populated_db
     db = ImageDB(db_path)
@@ -227,6 +247,18 @@ def test_image_single_not_found(populated_db):
     db_path, _ = populated_db
     db = ImageDB(db_path)
     assert db.image("nonexistent_stem") is None
+
+
+def test_image_without_scores_skips_scores(populated_db):
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    img = db.image("cam1_2025_06_01_20_00_00", with_scores=False)
+    assert img is not None
+    # Metadata + resolved paths are still present...
+    assert img.system == "cam1"
+    assert img.thumbnail_path is not None
+    # ...but the classifier-scores query was skipped.
+    assert img.classifier_scores == {}
 
 
 def test_count(populated_db):

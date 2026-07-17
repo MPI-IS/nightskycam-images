@@ -107,6 +107,7 @@ def _build_query_kwargs(
     image_format: Optional[str],
     has_thumbnail: Optional[bool],
     classifier_max: Optional[Dict[str, float]],
+    classifier_min: Optional[Dict[str, float]],
     locations: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Normalize convenience args and build kwargs for ``query_images``."""
@@ -146,6 +147,8 @@ def _build_query_kwargs(
         kwargs["has_thumbnail"] = has_thumbnail
     if classifier_max is not None:
         kwargs["classifier_max"] = classifier_max
+    if classifier_min is not None:
+        kwargs["classifier_min"] = classifier_min
     if locations is not None:
         kwargs["locations"] = locations
     return kwargs
@@ -224,6 +227,7 @@ class ImageDB:
         image_format: Optional[str] = None,
         has_thumbnail: Optional[bool] = None,
         classifier_max: Optional[Dict[str, float]] = None,
+        classifier_min: Optional[Dict[str, float]] = None,
         locations: Optional[List[str]] = None,
     ) -> int:
         """
@@ -246,6 +250,7 @@ class ImageDB:
             image_format=image_format,
             has_thumbnail=has_thumbnail,
             classifier_max=classifier_max,
+            classifier_min=classifier_min,
             locations=locations,
         )
         return count_images(self._db_path, **kwargs)
@@ -267,6 +272,7 @@ class ImageDB:
         image_format: Optional[str] = None,
         has_thumbnail: Optional[bool] = None,
         classifier_max: Optional[Dict[str, float]] = None,
+        classifier_min: Optional[Dict[str, float]] = None,
         locations: Optional[List[str]] = None,
         order_by: str = "position",
         descending: bool = False,
@@ -310,7 +316,11 @@ class ImageDB:
         has_thumbnail
             Filter by thumbnail presence.
         classifier_max
-            Dict of ``{classifier_name: max_probability}``.
+            Dict of ``{classifier_name: max_probability}`` (inclusive upper
+            bound on the score).
+        classifier_min
+            Dict of ``{classifier_name: min_probability}`` (inclusive lower
+            bound). Combine with ``classifier_max`` for a score range.
         order_by
             ``"position"`` (default) orders by system, date, time;
             ``"datetime"`` orders chronologically across systems.
@@ -344,6 +354,7 @@ class ImageDB:
             image_format=image_format,
             has_thumbnail=has_thumbnail,
             classifier_max=classifier_max,
+            classifier_min=classifier_min,
             locations=locations,
         )
         rows = query_images(
@@ -362,9 +373,18 @@ class ImageDB:
             )
         return [_row_to_record(row, scores_by_id.get(row["id"], {})) for row in rows]
 
-    def image(self, filename_stem: str) -> Optional[ImageRecord]:
+    def image(
+        self, filename_stem: str, *, with_scores: bool = True
+    ) -> Optional[ImageRecord]:
         """
         Look up a single image by filename stem.
+
+        Parameters
+        ----------
+        with_scores
+            When False, skip the extra classifier-scores query (a second DB
+            connection). Use it when only the metadata / file paths are
+            needed — e.g. resolving a thumbnail path — to halve the DB work.
 
         Returns
         -------
@@ -379,7 +399,11 @@ class ImageDB:
         conn.close()
         if row is None:
             return None
-        scores = get_classifier_scores(self._db_path, filename_stem)
+        scores = (
+            get_classifier_scores(self._db_path, filename_stem)
+            if with_scores
+            else {}
+        )
         return _row_to_record(dict(row), scores)
 
     def hd_paths(
@@ -399,6 +423,7 @@ class ImageDB:
         image_format: Optional[str] = None,
         has_thumbnail: Optional[bool] = None,
         classifier_max: Optional[Dict[str, float]] = None,
+        classifier_min: Optional[Dict[str, float]] = None,
         locations: Optional[List[str]] = None,
     ) -> List[Path]:
         """
@@ -424,6 +449,7 @@ class ImageDB:
                 image_format=image_format,
                 has_thumbnail=has_thumbnail,
                 classifier_max=classifier_max,
+                classifier_min=classifier_min,
                 locations=locations,
             )
             if img.hd_path is not None
@@ -446,6 +472,7 @@ class ImageDB:
         image_format: Optional[str] = None,
         has_thumbnail: Optional[bool] = None,
         classifier_max: Optional[Dict[str, float]] = None,
+        classifier_min: Optional[Dict[str, float]] = None,
         locations: Optional[List[str]] = None,
     ) -> List[Path]:
         """
@@ -471,6 +498,7 @@ class ImageDB:
                 image_format=image_format,
                 has_thumbnail=has_thumbnail,
                 classifier_max=classifier_max,
+                classifier_min=classifier_min,
                 locations=locations,
             )
             if img.thumbnail_path is not None
