@@ -3,6 +3,7 @@ Tests for the db_api module (high-level DB query API).
 """
 
 from pathlib import Path
+import sqlite3
 import tempfile
 from typing import Dict, List
 
@@ -15,7 +16,14 @@ from nightskycam_images.constants import (
     THUMBNAIL_DIR_NAME,
     THUMBNAIL_FILE_FORMAT,
 )
-from nightskycam_images.db import populate
+from nightskycam_images.db import (
+    parse_min_scores,
+    populate,
+    prune_missing,
+    read_stem_list,
+    remove_stems,
+    stems_with_min_scores,
+)
 from nightskycam_images.db_api import ImageDB, ImageRecord
 
 
@@ -201,6 +209,109 @@ def test_images_filter_classifier_range(populated_db):
     # An inverted range (min > max) matches nothing.
     empty = db.images(classifier_min={"cloudy": 0.9}, classifier_max={"cloudy": 0.1})
     assert empty == []
+
+
+def test_stems_with_min_scores_single(populated_db):
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    stems = stems_with_min_scores(db_path, {"cloudy": 0.5})
+    expected = {r.filename_stem for r in db.images(classifier_min={"cloudy": 0.5})}
+    assert set(stems) == expected  # cloudy 0.8 and 0.9
+    assert len(stems) == 2
+    assert stems == sorted(stems)  # sorted output
+
+
+def test_stems_with_min_scores_or_union(populated_db):
+    db_path, _ = populated_db
+    db = ImageDB(db_path)
+    # cloudy>=0.85 -> the 0.9 image; rainy>=0.5 -> the 0.95 image; OR = both.
+    stems = stems_with_min_scores(db_path, {"cloudy": 0.85, "rainy": 0.5})
+    union = {r.filename_stem for r in db.images(classifier_min={"cloudy": 0.85})} | {
+        r.filename_stem for r in db.images(classifier_min={"rainy": 0.5})
+    }
+    assert set(stems) == union
+    assert len(stems) == len(set(stems))  # de-duplicated
+
+
+def test_stems_with_min_scores_empty_and_unknown(populated_db):
+    db_path, _ = populated_db
+    assert stems_with_min_scores(db_path, {"cloudy": 0.99}) == []  # none that high
+    with pytest.raises(ValueError, match="unknown classifier"):
+        stems_with_min_scores(db_path, {"nope": 0.5})
+
+
+def test_parse_min_scores():
+    assert parse_min_scores(["cloudy=0.7", "rainy=0.5"]) == {
+        "cloudy": 0.7,
+        "rainy": 0.5,
+    }
+    for bad in ([], ["cloudy"], ["cloudy=x"], ["cloudy=1.5"], ["=0.5"]):
+        with pytest.raises(ValueError):
+            parse_min_scores(bad)
+
+
+def test_read_stem_list(tmp_path):
+    f = tmp_path / "list.txt"
+    f.write_text(
+        "# a comment\n"
+        "cam1_2025_06_01_20_00_00\n"
+        "\n"
+        "  cam2_2025_06_01_22_00_00  \n"
+        "cam1_2025_06_01_20_00_00\n"  # duplicate
+    )
+    assert read_stem_list(f) == [
+        "cam1_2025_06_01_20_00_00",
+        "cam2_2025_06_01_22_00_00",
+    ]
+
+
+def _score_count(db_path) -> int:
+    conn = sqlite3.connect(db_path)
+    (n,) = conn.execute("SELECT COUNT(*) FROM classifier_scores").fetchone()
+    conn.close()
+    return n
+
+
+def test_remove_stems_cascades_scores(populated_db):
+    db_path, _ = populated_db
+    assert ImageDB(db_path).count() == 4
+    assert _score_count(db_path) == 6  # 3 scored images x (cloudy+rainy)
+
+    stems = [
+        "cam1_2025_06_01_20_00_00",  # scored
+        "cam2_2025_06_01_22_00_00",  # scored
+        "nope_2099_01_01_00_00_00",  # not in DB
+    ]
+    dry = remove_stems(db_path, stems, dry_run=True)
+    assert dry == {"requested": 3, "matched": 2, "deleted": 0}
+    assert ImageDB(db_path).count() == 4  # unchanged
+
+    result = remove_stems(db_path, stems)
+    assert result == {"requested": 3, "matched": 2, "deleted": 2}
+    db = ImageDB(db_path)
+    assert db.count() == 2
+    assert db.image("cam1_2025_06_01_20_00_00") is None
+    assert db.image("cam1_2025_06_01_21_00_00") is not None  # untouched
+    assert _score_count(db_path) == 2  # cascade: only cam1_21's 2 scores remain
+
+
+def test_prune_missing_reconciles_with_disk(populated_db):
+    db_path, root = populated_db
+    assert ImageDB(db_path).count() == 4
+
+    # Remove one image's file from disk -> its row is now an orphan.
+    (root / "cam2" / "2025_06_01" / "cam2_2025_06_01_22_00_00.jpg").unlink()
+
+    dry = prune_missing(db_path, [root], dry_run=True)
+    assert dry == {"total": 4, "missing": 1, "deleted": 0}
+    assert ImageDB(db_path).count() == 4  # unchanged
+
+    result = prune_missing(db_path, [root])
+    assert result == {"total": 4, "missing": 1, "deleted": 1}
+    db = ImageDB(db_path)
+    assert db.count() == 3
+    assert db.image("cam2_2025_06_01_22_00_00") is None  # pruned
+    assert db.image("cam1_2025_06_01_20_00_00") is not None  # still on disk, kept
 
 
 def test_images_filter_format(populated_db):

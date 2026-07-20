@@ -1001,6 +1001,161 @@ def get_classifier_names(db_path: Path) -> List[str]:
     return [row["classifier_name"] for row in rows]
 
 
+def parse_min_scores(entries: List[str]) -> Dict[str, float]:
+    """
+    Parse repeatable ``NAME=VALUE`` CLI tokens into a ``{name: min}`` dict.
+
+    Each VALUE must be a float in ``0..1``. Raises ``ValueError`` (naming the
+    offending token) on an empty list, a malformed entry, or an out-of-range
+    value.
+    """
+    if not entries:
+        raise ValueError("provide at least one minimum score (NAME=VALUE)")
+    minimums: Dict[str, float] = {}
+    for entry in entries:
+        name, sep, raw = entry.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ValueError(f"expected NAME=VALUE, got {entry!r}")
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"{entry!r}: {raw!r} is not a number")
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{entry!r}: score must be within 0..1")
+        minimums[name] = value
+    return minimums
+
+
+def stems_with_min_scores(
+    db_path: Path, minimums: Dict[str, float]
+) -> List[str]:
+    """
+    Filename stems of images matching ANY of the per-classifier minimums.
+
+    An image is included if, for at least one ``{name: min}`` pair, its
+    ``name`` classifier score is ``>= min`` (OR / union across classifiers).
+    Returns the stems sorted and de-duplicated. Raises ``ValueError`` if a
+    classifier name is not present in the database.
+    """
+    valid = set(get_classifier_names(db_path))
+    unknown = [name for name in minimums if name not in valid]
+    if unknown:
+        raise ValueError(
+            f"unknown classifier(s) {unknown}; available: {sorted(valid)}"
+        )
+    stems: set = set()
+    for name, minimum in minimums.items():
+        rows = query_images(db_path, classifier_min={name: minimum})
+        stems.update(row["filename_stem"] for row in rows)
+    return sorted(stems)
+
+
+def read_stem_list(list_file: Path) -> List[str]:
+    """Read filename_stems from a text file (one per line; blank lines and
+    lines starting with ``#`` ignored), de-duplicated in order."""
+    seen: Set[str] = set()
+    stems: List[str] = []
+    for line in Path(list_file).read_text().splitlines():
+        name = line.strip()
+        if name and not name.startswith("#") and name not in seen:
+            seen.add(name)
+            stems.append(name)
+    return stems
+
+
+def _stem_chunks(stems: List[str], size: int = 500):
+    for start in range(0, len(stems), size):
+        yield stems[start : start + size]
+
+
+def _count_stems(conn: sqlite3.Connection, stems: List[str]) -> int:
+    total = 0
+    for chunk in _stem_chunks(stems):
+        placeholders = ",".join("?" for _ in chunk)
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM images WHERE filename_stem IN ({placeholders})",
+            chunk,
+        ).fetchone()
+        total += int(row[0])
+    return total
+
+
+def _delete_stems(conn: sqlite3.Connection, stems: List[str]) -> int:
+    """Delete rows by filename_stem (chunked). ``classifier_scores`` rows
+    cascade (FK ON DELETE CASCADE; ``open_db`` enables foreign_keys)."""
+    deleted = 0
+    for chunk in _stem_chunks(stems):
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = conn.execute(
+            f"DELETE FROM images WHERE filename_stem IN ({placeholders})", chunk
+        )
+        deleted += cursor.rowcount
+    return deleted
+
+
+def remove_stems(
+    db_path: Path, stems: List[str], dry_run: bool = False
+) -> Dict[str, int]:
+    """
+    Remove images (and their classifier scores, via cascade) by
+    ``filename_stem``. Returns ``{"requested", "matched", "deleted"}`` —
+    ``matched`` is how many requested stems exist in the DB; ``deleted`` is 0
+    on a dry run.
+    """
+    unique = list(dict.fromkeys(s for s in stems if s))
+    conn = open_db(db_path)
+    try:
+        matched = _count_stems(conn, unique)
+        deleted = 0
+        if not dry_run and matched:
+            deleted = _delete_stems(conn, unique)
+            conn.commit()
+            conn.execute("PRAGMA optimize")
+    finally:
+        conn.close()
+    return {"requested": len(unique), "matched": matched, "deleted": deleted}
+
+
+def prune_missing(
+    db_path: Path, roots: List[Path], dry_run: bool = False
+) -> Dict[str, int]:
+    """
+    Delete rows whose HD image file no longer exists under any of ``roots``
+    (checking ``root/system/date/{stem}.{fmt}`` for ``fmt`` in
+    IMAGE_FILE_FORMATS, as ns.db.update scans). Returns
+    ``{"total", "missing", "deleted"}`` (``deleted`` is 0 on a dry run).
+    """
+    conn = open_db(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT filename_stem, system, date FROM images"
+        ).fetchall()
+        total = len(rows)
+        missing = [
+            row["filename_stem"]
+            for row in rows
+            if not any(
+                (
+                    Path(root)
+                    / row["system"]
+                    / row["date"]
+                    / f"{row['filename_stem']}.{fmt}"
+                ).is_file()
+                for root in roots
+                for fmt in IMAGE_FILE_FORMATS
+            )
+        ]
+        deleted = 0
+        if not dry_run and missing:
+            deleted = _delete_stems(conn, missing)
+            conn.commit()
+            conn.execute("PRAGMA optimize")
+    finally:
+        conn.close()
+    return {"total": total, "missing": len(missing), "deleted": deleted}
+
+
 def get_classifier_scores(db_path: Path, filename_stem: str) -> Dict[str, float]:
     """
     Get all classifier scores for a single image.

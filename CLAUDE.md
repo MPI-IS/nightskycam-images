@@ -85,11 +85,11 @@ Supporting top-level directories:
 Defined in `pyproject.toml` under `[tool.poetry.scripts]`. Commands follow a `ns.<namespace>.<action>` convention — when adding new commands, match the existing namespace:
 
 - `ns.thumb.*` — thumbnail listing/checking/creation/copying
-- `ns.files.*` — backup, deletion, move-clear, remove-selected, `stats` (filesystem-walk report) (and `ns.files.web.*` for file-based webapps)
+- `ns.files.*` — backup, deletion, move-clear, remove-selected, `move-list` (`LIST_FILE ROOT DESTINATION [--second-root R2] [--dry-run]` — move the images named in a list file, one filename_stem per line as emitted by `ns.db.filter`, together with their `.toml` and thumbnail, from whichever root holds each into DESTINATION keeping the `system/date` structure; fail-fast on any destination collision; does not touch the DB — run `ns.db.update` after), `stats` (filesystem-walk report) (and `ns.files.web.*` for file-based webapps)
 - `ns.filter.*` — `export` (creates symlinks from a TOML config), `copy` (retargets symlinks to a new root), `scorer` (filter via trained classifier)
 - `ns.ml.*` — `classify`, `scorer`, `train` (latter lives in `nightskycam_images.classifier`)
 - `ns.backup.*` — backup pipeline routing
-- `ns.db.*` — `update` (rebuild/refresh SQLite mirror; optional inline classifier pass via `--classifier-config` and location fill via `--locations`), `stats` (DB-derived summary incl. classifier scores), `locations` (backfill the `images.location` column from a per-system date-range mapping TOML; `--dry-run` supported; never clears existing values), `web.view` (legacy prototype)
+- `ns.db.*` — `update` (rebuild/refresh SQLite mirror; optional inline classifier pass via `--classifier-config` and location fill via `--locations`; **note: upsert-only — never deletes rows for images that left the disk**), `stats` (DB-derived summary incl. classifier scores), `filter` (`DB_PATH OUTPUT_FILE --min NAME=VALUE ...` — write the filename stems of images meeting ANY per-classifier minimum score, one per line, to an absolute output path; OR/union across classifiers), `remove-list` (`DB_PATH LIST_FILE [--dry-run]` — remove the images named in a list file, one filename_stem per line, from the DB; classifier scores cascade), `prune` (`DB_PATH ROOT [--second-root R2] [--dry-run]` — delete rows whose image file no longer exists under the root(s), reconciling the DB with the filesystem), `locations` (backfill the `images.location` column from a per-system date-range mapping TOML; `--dry-run` supported; never clears existing values), `web.view` (legacy prototype)
 - `ns.annotate` — annotation CLI (`nightskycam_images.annotator.cli`)
 - `ns.util.*` — utilities (e.g., `patches`)
 

@@ -23,11 +23,19 @@ from .classifier_runner import (
     load_classifiers,
     make_populate_enricher,
 )
-from .constants import IMAGE_FILE_FORMATS, THUMBNAIL_DIR_NAME, VIDEO_FILE_NAME
+from .constants import (
+    DATE_FORMAT_FILE,
+    IMAGE_FILE_FORMATS,
+    THUMBNAIL_DIR_NAME,
+    THUMBNAIL_FILE_FORMAT,
+    VIDEO_FILE_NAME,
+)
 from .convert_npy import to_npy
 from .db import apply_locations, get_default_db_path
 from .db import get_stats as db_get_stats
-from .db import populate as db_populate
+from .db import parse_min_scores, populate as db_populate
+from .db import prune_missing, read_stem_list, remove_stems
+from .db import stems_with_min_scores
 from .db_view_webapp import create_app as create_db_view_app
 from .locations import load_locations
 from .patches import load_image_and_extract_patches, save_patches_from_folder
@@ -43,6 +51,7 @@ from .walk import (
     filter_and_export_images,
     get_images,
     move_clear_images,
+    parse_image_path,
     walk_dates,
     walk_systems,
     walk_thumbnails,
@@ -1257,6 +1266,204 @@ def _move_file_safe(source: Path, dest: Path, dry_run: bool = False) -> bool:
     except Exception as e:
         logger.error(f"Failed to move {source} to {dest}: {e}")
         raise
+
+
+def _resolve_stem_files(stem: str, roots: List[Path]) -> Tuple[Optional[Path], List[Path]]:
+    """
+    Locate an image's on-disk files from its bare ``filename_stem``.
+
+    Parses the stem into system + date, then searches ``roots`` in order for
+    the first that contains the image; returns ``(source_root, files)`` where
+    ``files`` are the image file(s) present (any of IMAGE_FILE_FORMATS) plus
+    the ``.toml`` and thumbnail when present. Returns ``(None, [])`` if no
+    root has the image. Raises on an unparseable stem.
+    """
+    system, datetime_ = parse_image_path(Path(stem))
+    date_str = datetime_.strftime(DATE_FORMAT_FILE)
+    for root in roots:
+        date_dir = root / system / date_str
+        images = [
+            date_dir / f"{stem}.{fmt}"
+            for fmt in IMAGE_FILE_FORMATS
+            if (date_dir / f"{stem}.{fmt}").is_file()
+        ]
+        if not images:
+            continue
+        files = list(images)
+        toml_path = date_dir / f"{stem}.toml"
+        if toml_path.is_file():
+            files.append(toml_path)
+        thumb_path = date_dir / THUMBNAIL_DIR_NAME / f"{stem}.{THUMBNAIL_FILE_FORMAT}"
+        if thumb_path.is_file():
+            files.append(thumb_path)
+        return root, files
+    return None, []
+
+
+def _move_selected_from_list(
+    list_file: Path,
+    roots: List[Path],
+    destination: Path,
+    dry_run: bool = False,
+) -> Dict[str, int]:
+    """
+    Move the images named in ``list_file`` (one ``filename_stem`` per line;
+    blank lines and ``#`` comments ignored) — with their ``.toml`` and
+    thumbnail — from whichever root contains each into ``destination``,
+    keeping the ``system/date[/thumbnails]`` structure.
+
+    Fail-fast: if any target already exists in ``destination`` NOTHING is
+    moved and ``FileExistsError`` is raised.
+    """
+    stats = {
+        "stems": 0,
+        "moved_images": 0,
+        "moved_toml": 0,
+        "moved_thumbs": 0,
+        "not_found": 0,
+        "invalid": 0,
+    }
+
+    seen: set = set()
+    stems: List[str] = []
+    for line in Path(list_file).read_text().splitlines():
+        name = line.strip()
+        if name and not name.startswith("#") and name not in seen:
+            seen.add(name)
+            stems.append(name)
+    stats["stems"] = len(stems)
+
+    # Pass 1 — resolve move operations without writing anything.
+    ops: List[Tuple[Path, Path]] = []
+    for stem in stems:
+        try:
+            source_root, files = _resolve_stem_files(stem, roots)
+        except Exception:
+            stats["invalid"] += 1
+            logger.warning(f"skipping unparseable image name: {stem!r}")
+            continue
+        if source_root is None:
+            stats["not_found"] += 1
+            logger.info(f"not found in any root: {stem}")
+            continue
+        for source in files:
+            ops.append((source, destination / source.relative_to(source_root)))
+
+    # Pass 2 — fail-fast on any collision BEFORE moving anything.
+    dest_seen: set = set()
+    for _, dest in ops:
+        if dest.exists() or dest in dest_seen:
+            raise FileExistsError(f"destination already exists: {dest}")
+        dest_seen.add(dest)
+
+    # Pass 3 — execute (honors dry-run inside _move_file_safe).
+    for source, dest in ops:
+        _move_file_safe(source, dest, dry_run=dry_run)
+        if source.parent.name == THUMBNAIL_DIR_NAME:
+            stats["moved_thumbs"] += 1
+        elif source.suffix.lower() == ".toml":
+            stats["moved_toml"] += 1
+        else:
+            stats["moved_images"] += 1
+
+    if not dry_run:
+        for root in roots:
+            _cleanup_empty_directories(root, dry_run=False)
+    return stats
+
+
+def move_list() -> None:
+    """
+    CLI tool to move the images named in a list file (one filename_stem per
+    line, e.g. from ns.db.filter) — with their .toml and thumbnail — into a
+    destination folder, keeping the system/date structure.
+    """
+    typer_app = typer.Typer(
+        help=(
+            "Move the images listed in a file (one filename_stem per line) "
+            "plus their .toml and thumbnail into a destination, keeping the "
+            "system/date structure. The database is not touched — run "
+            "ns.db.update afterwards to refresh it."
+        )
+    )
+
+    @typer_app.command()
+    def run(
+        list_file: Path = typer.Argument(
+            ...,
+            help="Text file with one image name (filename_stem) per line.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        root: Path = typer.Argument(
+            ...,
+            help="Data root folder to move images out of.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        destination: Path = typer.Argument(
+            ...,
+            help="Destination folder (created if missing).",
+            resolve_path=True,
+        ),
+        second_root: Optional[Path] = typer.Option(
+            None,
+            "--second-root",
+            help="Optional second data root to also search.",
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Show what would move without moving."
+        ),
+        debug: bool = typer.Option(False, "--debug", help="Verbose logging."),
+    ) -> None:
+        """Move listed images and their metadata into DESTINATION."""
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG" if debug else "INFO")
+
+        roots = [root]
+        if second_root is not None:
+            second_root = second_root.resolve()
+            if not second_root.is_dir():
+                typer.echo(
+                    f"Error: --second-root does not exist or is not a "
+                    f"directory: {second_root}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            roots.append(second_root)
+
+        for a_root in roots:
+            if destination.is_relative_to(a_root) or a_root.is_relative_to(
+                destination
+            ):
+                typer.echo(
+                    f"Error: destination ({destination}) must be outside the "
+                    f"data root ({a_root}).",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+
+        try:
+            stats = _move_selected_from_list(
+                list_file, roots, destination, dry_run=dry_run
+            )
+        except FileExistsError as error:
+            typer.echo(f"Error: {error}", err=True)
+            raise typer.Exit(code=1)
+
+        prefix = "[DRY-RUN] " if dry_run else ""
+        typer.echo(
+            f"{prefix}{stats['moved_images']} image(s), {stats['moved_toml']} "
+            f"toml, {stats['moved_thumbs']} thumbnail(s) moved from "
+            f"{stats['stems']} listed name(s); {stats['not_found']} not found, "
+            f"{stats['invalid']} invalid."
+        )
+
+    typer_app()
 
 
 def _delete_path_safe(path: Path, dry_run: bool = False) -> bool:
@@ -4323,6 +4530,185 @@ def _parse_model_spec(spec: str) -> Tuple[str, Path, float]:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"Threshold must be between 0.0 and 1.0, got {threshold}")
     return name, model_path, threshold
+
+
+def db_filter() -> None:
+    """
+    CLI tool to write, to a text file, the names (filename stems) of images
+    whose classifier scores meet given minimums (OR across classifiers).
+    """
+    typer_app = typer.Typer(
+        help=(
+            "Write the filename stems of images matching ANY of the given "
+            "per-classifier minimum scores, one per line, to an output file."
+        )
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        output_file: Path = typer.Argument(
+            ...,
+            help="Absolute path of the text file to write (one stem per line).",
+            resolve_path=False,
+        ),
+        min_: List[str] = typer.Option(
+            [],
+            "--min",
+            "-m",
+            help=(
+                "Minimum score as NAME=VALUE (0..1), repeatable; an image is "
+                "written if it meets ANY of them, e.g. "
+                "--min cloudy=0.7 --min rainy=0.5"
+            ),
+        ),
+    ) -> None:
+        """Select image names by minimum classifier scores (any/OR)."""
+        if not output_file.is_absolute():
+            typer.echo(
+                f"Error: output file must be an absolute path: {output_file}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            minimums = parse_min_scores(min_)
+            stems = stems_with_min_scores(db_path, minimums)
+        except ValueError as error:
+            typer.echo(f"Error: {error}", err=True)
+            raise typer.Exit(code=1)
+        try:
+            with open(output_file, "w") as f:
+                for stem in stems:
+                    f.write(f"{stem}\n")
+        except OSError as error:
+            typer.echo(
+                f"Error: could not write {output_file}: {error}", err=True
+            )
+            raise typer.Exit(code=1)
+        typer.echo(f"{len(stems)} image name(s) written to {output_file}")
+
+    typer_app()
+
+
+def db_remove_list() -> None:
+    """
+    CLI tool to remove the images named in a list file (one filename_stem
+    per line, e.g. from ns.db.filter) from the metadata database.
+    """
+    typer_app = typer.Typer(
+        help=(
+            "Remove the images named in a list file (one filename_stem per "
+            "line) from the database. Their classifier scores are removed too "
+            "(cascade). Use after moving/deleting the files on disk."
+        )
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        list_file: Path = typer.Argument(
+            ...,
+            help="Text file with one image name (filename_stem) per line.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Report what would be removed, remove nothing."
+        ),
+        debug: bool = typer.Option(False, "--debug", help="Verbose logging."),
+    ) -> None:
+        """Remove listed images from the database."""
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG" if debug else "INFO")
+        result = remove_stems(db_path, read_stem_list(list_file), dry_run=dry_run)
+        prefix = "[DRY-RUN] " if dry_run else ""
+        verb = "would remove" if dry_run else "removed"
+        typer.echo(
+            f"{prefix}{verb} {result['matched']} image(s) from the database "
+            f"({result['requested']} listed)."
+        )
+
+    typer_app()
+
+
+def db_prune() -> None:
+    """
+    CLI tool to delete database rows whose image file no longer exists under
+    the given data root(s) — reconciling the DB with the filesystem.
+    """
+    typer_app = typer.Typer(
+        help=(
+            "Delete database rows whose HD image file no longer exists under "
+            "the given data root(s). Reconciles the DB with the filesystem "
+            "(ns.db.update never deletes)."
+        )
+    )
+
+    @typer_app.command()
+    def run(
+        db_path: Path = typer.Argument(
+            ...,
+            help="Path to the SQLite database file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        root: Path = typer.Argument(
+            ...,
+            help="Data root folder to check images against.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+        second_root: Optional[Path] = typer.Option(
+            None, "--second-root", help="Optional second data root to also check."
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Report what would be pruned, prune nothing."
+        ),
+        debug: bool = typer.Option(False, "--debug", help="Verbose logging."),
+    ) -> None:
+        """Prune rows whose image file is missing on disk."""
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG" if debug else "INFO")
+        roots = [root]
+        if second_root is not None:
+            second_root = second_root.resolve()
+            if not second_root.is_dir():
+                typer.echo(
+                    f"Error: --second-root does not exist or is not a "
+                    f"directory: {second_root}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            roots.append(second_root)
+        result = prune_missing(db_path, roots, dry_run=dry_run)
+        prefix = "[DRY-RUN] " if dry_run else ""
+        verb = "would prune" if dry_run else "pruned"
+        typer.echo(
+            f"{prefix}{verb} {result['missing']} of {result['total']} row(s) "
+            f"(image file missing under the root(s))."
+        )
+
+    typer_app()
 
 
 def backup_route() -> None:

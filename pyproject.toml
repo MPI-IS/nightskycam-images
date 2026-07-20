@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nightskycam-images"
-version = "0.2.0"
+version = "0.5.0"
 description = ""
 authors = ["Vincent Berenz <vincent.berenz@tuebingen.mpg.de>"]
 readme = "README.md"
@@ -36,6 +36,7 @@ rich = "^14.2.0"
 "ns.files.backup" = 'nightskycam_images.main:move_to_backup'
 "ns.files.delete-from-other" = 'nightskycam_images.main:delete_from_other_root'
 "ns.files.move-clear" = 'nightskycam_images.main:move_clear_images_cli'
+"ns.files.move-list" = 'nightskycam_images.main:move_list'
 "ns.files.remove-selected" = 'nightskycam_images.main:remove_selected'
 "ns.files.stats" = 'nightskycam_images.main:stats'
 # ns.files.web.* — Web applications (file-based)
@@ -55,6 +56,9 @@ rich = "^14.2.0"
 # ns.db.* — Database
 "ns.db.update" = 'nightskycam_images.main:db_update'
 "ns.db.stats" = 'nightskycam_images.main:db_stats'
+"ns.db.filter" = 'nightskycam_images.main:db_filter'
+"ns.db.remove-list" = 'nightskycam_images.main:db_remove_list'
+"ns.db.prune" = 'nightskycam_images.main:db_prune'
 "ns.db.locations" = 'nightskycam_images.main:db_locations'
 "ns.db.web.view" = 'nightskycam_images.main:db_view_webapp'
 # ns.annotate — Annotation CLI
