@@ -4032,15 +4032,17 @@ def db_update() -> None:
                 "preserved either way."
             ),
         ),
-        locations: Optional[Path] = typer.Option(
-            None,
+        locations: Path = typer.Option(
+            ...,
             "--locations",
             help=(
-                "Optional path to a per-system location mapping TOML (see "
-                "ns.db.locations). When set, each upserted image's location "
-                "is filled from the mapping (system + date). Without it, "
-                "locations already stored in the database are preserved "
-                "untouched."
+                "Path to the per-system location mapping TOML (see "
+                "ns.db.locations). REQUIRED: every upserted image's location "
+                "is filled from the mapping (system + date), so newly scanned "
+                "images are never silently left with an unknown location. "
+                "Systems/dates not covered by the mapping still get NULL "
+                "(genuinely unknown); an existing stored location is preserved "
+                "when the mapping yields no value."
             ),
             exists=True,
             file_okay=True,
@@ -4111,21 +4113,22 @@ def db_update() -> None:
                 "--classifier-overwrite has no effect without --classifier-config"
             )
 
-        # Set up optional location lookup.
-        location_lookup = None
-        if locations is not None:
-            try:
-                logger.info(f"Loading location mapping: {locations}")
-                location_map = load_locations(locations)
-                logger.info(
-                    f"Location mapping systems: " f"{', '.join(location_map.systems)}"
-                )
-                location_lookup = location_map.lookup
-            except Exception as e:
-                logger.error(f"Failed to load location mapping: {e}")
-                if debug:
-                    raise
-                sys.exit(1)
+        # Location lookup (required): every upserted image's location is filled
+        # from the mapping. A covered system/date gets its site name; anything
+        # not covered stays NULL (genuinely unknown). This guarantees newly
+        # scanned images are never left location-less by a forgotten flag.
+        try:
+            logger.info(f"Loading location mapping: {locations}")
+            location_map = load_locations(locations)
+            logger.info(
+                f"Location mapping systems: " f"{', '.join(location_map.systems)}"
+            )
+            location_lookup = location_map.lookup
+        except Exception as e:
+            logger.error(f"Failed to load location mapping: {e}")
+            if debug:
+                raise
+            sys.exit(1)
 
         logger.info(
             f"Starting database population ({'full' if full else 'incremental'})..."
