@@ -1277,26 +1277,39 @@ def _resolve_stem_files(stem: str, roots: List[Path]) -> Tuple[Optional[Path], L
     ``files`` are the image file(s) present (any of IMAGE_FILE_FORMATS) plus
     the ``.toml`` and thumbnail when present. Returns ``(None, [])`` if no
     root has the image. Raises on an unparseable stem.
+
+    On disk, images are filed by **observing-night**, not calendar date: a
+    capture after midnight (before noon) lives in the previous day's folder
+    (e.g. ``..._2026_07_21_00_34_30`` is stored under ``2026_07_20/``). So we
+    try both the filename's calendar-date folder and that night folder — the
+    calendar date is what the stem carries; the night date is what the folder
+    (and the DB ``date`` column) actually use.
     """
     system, datetime_ = parse_image_path(Path(stem))
-    date_str = datetime_.strftime(DATE_FORMAT_FILE)
+    date_dirs = [datetime_.strftime(DATE_FORMAT_FILE)]
+    if datetime_.hour < 12:
+        night = (datetime_ - dt.timedelta(days=1)).strftime(DATE_FORMAT_FILE)
+        date_dirs.append(night)
     for root in roots:
-        date_dir = root / system / date_str
-        images = [
-            date_dir / f"{stem}.{fmt}"
-            for fmt in IMAGE_FILE_FORMATS
-            if (date_dir / f"{stem}.{fmt}").is_file()
-        ]
-        if not images:
-            continue
-        files = list(images)
-        toml_path = date_dir / f"{stem}.toml"
-        if toml_path.is_file():
-            files.append(toml_path)
-        thumb_path = date_dir / THUMBNAIL_DIR_NAME / f"{stem}.{THUMBNAIL_FILE_FORMAT}"
-        if thumb_path.is_file():
-            files.append(thumb_path)
-        return root, files
+        for date_str in date_dirs:
+            date_dir = root / system / date_str
+            images = [
+                date_dir / f"{stem}.{fmt}"
+                for fmt in IMAGE_FILE_FORMATS
+                if (date_dir / f"{stem}.{fmt}").is_file()
+            ]
+            if not images:
+                continue
+            files = list(images)
+            toml_path = date_dir / f"{stem}.toml"
+            if toml_path.is_file():
+                files.append(toml_path)
+            thumb_path = (
+                date_dir / THUMBNAIL_DIR_NAME / f"{stem}.{THUMBNAIL_FILE_FORMAT}"
+            )
+            if thumb_path.is_file():
+                files.append(thumb_path)
+            return root, files
     return None, []
 
 

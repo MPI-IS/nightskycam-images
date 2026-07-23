@@ -92,6 +92,34 @@ def test_not_found_and_invalid(tree):
     assert stats["invalid"] == 1  # unparseable line
 
 
+def test_after_midnight_stem_found_in_night_folder(tree):
+    tmp, root, dest, _ = tree
+    # An after-midnight capture is filed under the previous day's (observing-
+    # night) folder, but its filename carries the next calendar date. move-list
+    # must still find it (it derives the folder from the stem's calendar date).
+    night = "2025_06_10"
+    stem = "cam1_2025_06_11_00_34_30"  # 00:34 -> belongs to the 06_10 night
+    date_dir = root / "cam1" / night
+    thumb_dir = date_dir / THUMBNAIL_DIR_NAME
+    thumb_dir.mkdir(parents=True)
+    img = np.random.randint(0, 255, (8, 8, 3), dtype=np.uint8)
+    cv2.imwrite(str(date_dir / f"{stem}.jpg"), img)
+    cv2.imwrite(str(thumb_dir / f"{stem}.{THUMBNAIL_FILE_FORMAT}"), img[:4, :4])
+    with open(date_dir / f"{stem}.toml", "wb") as f:
+        tomli_w.dump({"process": "raw"}, f)
+
+    lst = _write_list(tmp / "sel.txt", [stem])
+    stats = _move_selected_from_list(lst, [root], dest)
+
+    assert stats["moved_images"] == 1
+    assert stats["not_found"] == 0
+    moved = dest / "cam1" / night  # night-folder structure preserved
+    assert (moved / f"{stem}.jpg").is_file()
+    assert (moved / THUMBNAIL_DIR_NAME / f"{stem}.{THUMBNAIL_FILE_FORMAT}").is_file()
+    assert (moved / f"{stem}.toml").is_file()
+    assert not (date_dir / f"{stem}.jpg").exists()
+
+
 def test_collision_is_fail_fast(tree):
     tmp, root, dest, (a, b, c) = tree
     # Pre-create the target for `a`; the run must abort before moving anything.
