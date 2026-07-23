@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import asdict, dataclass
 import datetime as dt
+import filecmp
 import logging
 from pathlib import Path
 import shutil
@@ -1313,6 +1314,16 @@ def _resolve_stem_files(stem: str, roots: List[Path]) -> Tuple[Optional[Path], L
     return None, []
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """True if ``a`` and ``b`` have identical contents (full byte compare;
+    ``filecmp`` short-circuits on a size mismatch). Used before deleting a
+    source whose target already exists, so we never drop a differing image."""
+    try:
+        return filecmp.cmp(a, b, shallow=False)
+    except OSError:
+        return False
+
+
 def _move_selected_from_list(
     list_file: Path,
     roots: List[Path],
@@ -1325,8 +1336,15 @@ def _move_selected_from_list(
     thumbnail — from whichever root contains each into ``destination``,
     keeping the ``system/date[/thumbnails]`` structure.
 
-    Fail-fast: if any target already exists in ``destination`` NOTHING is
-    moved and ``FileExistsError`` is raised.
+    Each listed image ends up ONLY in ``destination``:
+      - no target yet            -> the image is moved there;
+      - identical target exists  -> it was already archived by an earlier run,
+                                    so the redundant source is DELETED (the
+                                    image still leaves the dataset);
+      - target exists but DIFFERS -> a real conflict: never overwritten or
+                                    deleted, logged and left wholly in place.
+    Handling is atomic per image. Returns ``already_archived`` (sources
+    removed) and ``conflicts`` (left in place) alongside the move counts.
     """
     stats = {
         "stems": 0,
@@ -1335,6 +1353,8 @@ def _move_selected_from_list(
         "moved_thumbs": 0,
         "not_found": 0,
         "invalid": 0,
+        "already_archived": 0,
+        "conflicts": 0,
     }
 
     seen: set = set()
@@ -1346,8 +1366,8 @@ def _move_selected_from_list(
             stems.append(name)
     stats["stems"] = len(stems)
 
-    # Pass 1 — resolve move operations without writing anything.
-    ops: List[Tuple[Path, Path]] = []
+    # Pass 1 — resolve each image's move operations without writing anything.
+    per_image_ops: List[Tuple[str, List[Tuple[Path, Path]]]] = []
     for stem in stems:
         try:
             source_root, files = _resolve_stem_files(stem, roots)
@@ -1359,25 +1379,41 @@ def _move_selected_from_list(
             stats["not_found"] += 1
             logger.info(f"not found in any root: {stem}")
             continue
-        for source in files:
-            ops.append((source, destination / source.relative_to(source_root)))
+        ops = [
+            (source, destination / source.relative_to(source_root))
+            for source in files
+        ]
+        per_image_ops.append((stem, ops))
 
-    # Pass 2 — fail-fast on any collision BEFORE moving anything.
-    dest_seen: set = set()
-    for _, dest in ops:
-        if dest.exists() or dest in dest_seen:
-            raise FileExistsError(f"destination already exists: {dest}")
-        dest_seen.add(dest)
-
-    # Pass 3 — execute (honors dry-run inside _move_file_safe).
-    for source, dest in ops:
-        _move_file_safe(source, dest, dry_run=dry_run)
-        if source.parent.name == THUMBNAIL_DIR_NAME:
-            stats["moved_thumbs"] += 1
-        elif source.suffix.lower() == ".toml":
-            stats["moved_toml"] += 1
+    # Pass 2 — realise each image so it ends up only in the destination.
+    for stem, ops in per_image_ops:
+        existing = [(src, dest) for src, dest in ops if dest.exists()]
+        if not existing:
+            # Clean move.
+            for source, dest in ops:
+                _move_file_safe(source, dest, dry_run=dry_run)
+                if source.parent.name == THUMBNAIL_DIR_NAME:
+                    stats["moved_thumbs"] += 1
+                elif source.suffix.lower() == ".toml":
+                    stats["moved_toml"] += 1
+                else:
+                    stats["moved_images"] += 1
+        elif len(existing) == len(ops) and all(
+            _same_file(src, dest) for src, dest in ops
+        ):
+            # Already fully archived and byte-identical: the move is effectively
+            # done — remove the redundant source so it leaves the dataset.
+            for source, _ in ops:
+                _delete_path_safe(source, dry_run=dry_run)
+            stats["already_archived"] += 1
+            logger.info(f"already archived (identical), removed source: {stem}")
         else:
-            stats["moved_images"] += 1
+            # Target exists but differs (or only partially present): a real
+            # conflict — never overwrite/delete, leave the image untouched.
+            stats["conflicts"] += 1
+            logger.warning(
+                f"destination differs, leaving {stem} in place: {existing[0][1]}"
+            )
 
     if not dry_run:
         for root in roots:
@@ -1460,20 +1496,18 @@ def move_list() -> None:
                 )
                 raise typer.Exit(code=1)
 
-        try:
-            stats = _move_selected_from_list(
-                list_file, roots, destination, dry_run=dry_run
-            )
-        except FileExistsError as error:
-            typer.echo(f"Error: {error}", err=True)
-            raise typer.Exit(code=1)
+        stats = _move_selected_from_list(
+            list_file, roots, destination, dry_run=dry_run
+        )
 
         prefix = "[DRY-RUN] " if dry_run else ""
         typer.echo(
             f"{prefix}{stats['moved_images']} image(s), {stats['moved_toml']} "
             f"toml, {stats['moved_thumbs']} thumbnail(s) moved from "
-            f"{stats['stems']} listed name(s); {stats['not_found']} not found, "
-            f"{stats['invalid']} invalid."
+            f"{stats['stems']} listed name(s); "
+            f"{stats['already_archived']} already archived (source removed), "
+            f"{stats['conflicts']} conflict(s) left in place, "
+            f"{stats['not_found']} not found, {stats['invalid']} invalid."
         )
 
     typer_app()

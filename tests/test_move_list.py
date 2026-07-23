@@ -1,6 +1,7 @@
 """Tests for ns.files.move-list (`_move_selected_from_list`)."""
 
 from pathlib import Path
+import shutil
 import tempfile
 
 import cv2
@@ -120,17 +121,47 @@ def test_after_midnight_stem_found_in_night_folder(tree):
     assert not (date_dir / f"{stem}.jpg").exists()
 
 
-def test_collision_is_fail_fast(tree):
+def test_identical_target_removes_source(tree):
     tmp, root, dest, (a, b, c) = tree
-    # Pre-create the target for `a`; the run must abort before moving anything.
-    target = dest / "cam1" / "2025_06_01" / f"{a}.jpg"
-    target.parent.mkdir(parents=True)
-    target.write_text("x")
+    # Pre-archive `a` identically at the destination (as an earlier run would).
+    src_dir = root / "cam1" / "2025_06_01"
+    dst_dir = dest / "cam1" / "2025_06_01"
+    (dst_dir / THUMBNAIL_DIR_NAME).mkdir(parents=True)
+    shutil.copy2(src_dir / f"{a}.jpg", dst_dir / f"{a}.jpg")
+    shutil.copy2(src_dir / f"{a}.toml", dst_dir / f"{a}.toml")
+    shutil.copy2(
+        src_dir / THUMBNAIL_DIR_NAME / f"{a}.{THUMBNAIL_FILE_FORMAT}",
+        dst_dir / THUMBNAIL_DIR_NAME / f"{a}.{THUMBNAIL_FILE_FORMAT}",
+    )
     lst = _write_list(tmp / "sel.txt", [a, b])
 
-    with pytest.raises(FileExistsError):
-        _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], dest)
 
-    # Atomic: nothing was moved from the source root.
+    assert stats["already_archived"] == 1  # `a` was a duplicate
+    assert stats["moved_images"] == 1  # `b` moved normally
+    assert stats["conflicts"] == 0
+    # `a` is gone from the dataset (the whole point), archive copy intact.
+    assert not (src_dir / f"{a}.jpg").exists()
+    assert not (src_dir / f"{a}.toml").exists()
+    assert (dst_dir / f"{a}.jpg").is_file()
+    # `b` moved out.
+    assert (dst_dir / f"{b}.jpg").is_file()
+
+
+def test_differing_target_is_a_conflict(tree):
+    tmp, root, dest, (a, b, c) = tree
+    # A target that exists but differs must NOT be overwritten or deleted.
+    target = dest / "cam1" / "2025_06_01" / f"{a}.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_text("different content")
+    lst = _write_list(tmp / "sel.txt", [a, b])
+
+    stats = _move_selected_from_list(lst, [root], dest)
+
+    assert stats["conflicts"] == 1
+    assert stats["already_archived"] == 0
+    assert stats["moved_images"] == 1  # `b` still moved
+    # `a` left wholly in place; the differing target untouched.
     assert (root / "cam1" / "2025_06_01" / f"{a}.jpg").is_file()
-    assert (root / "cam1" / "2025_06_01" / f"{b}.jpg").is_file()
+    assert (root / "cam1" / "2025_06_01" / f"{a}.toml").is_file()
+    assert target.read_text() == "different content"
