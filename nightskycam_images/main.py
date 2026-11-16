@@ -3390,3 +3390,349 @@ def symlink_annotator_webapp():
             raise typer.Exit(code=0)
 
     app()
+
+
+# ============================================================================
+# Classify Images Command
+# ============================================================================
+
+
+@dataclass
+class _ClassifyImagesConfig:
+    """Configuration for classify-images command."""
+
+    root: Path
+    models: Dict[str, Path]  # classifier_name -> model_path
+    systems: Optional[List[str]] = None
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
+
+
+def _classify_images_config_to_dict(config: _ClassifyImagesConfig) -> Dict[str, Any]:
+    """Convert a _ClassifyImagesConfig to a dictionary for TOML serialization."""
+    result: Dict[str, Any] = {}
+    result["root"] = str(config.root)
+    if config.systems is not None:
+        result["systems"] = config.systems
+    if config.start_date is not None:
+        result["start_date"] = config.start_date.strftime("%Y-%m-%d")
+    if config.end_date is not None:
+        result["end_date"] = config.end_date.strftime("%Y-%m-%d")
+    result["models"] = {name: str(path) for name, path in config.models.items()}
+    return result
+
+
+def _get_default_classify_images_config() -> Dict[str, Any]:
+    """Return a default configuration dictionary for classify-images."""
+    config = _ClassifyImagesConfig(
+        root=Path("/path/to/media/root"),
+        models={
+            "quality": Path("/path/to/quality_model.pt"),
+            "clouds": Path("/path/to/clouds_model.pt"),
+        },
+        systems=["nightskycam5"],
+        start_date=dt.date(2025, 1, 1),
+        end_date=dt.date(2025, 12, 31),
+    )
+    return _classify_images_config_to_dict(config)
+
+
+def _parse_classify_images_config(config: Dict[str, Any]) -> _ClassifyImagesConfig:
+    """Parse and validate classify-images configuration values."""
+    # Required: root
+    if "root" not in config:
+        raise ValueError("Configuration must include 'root' field")
+    root = Path(config["root"])
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Root directory does not exist: {root}")
+
+    # Required: models
+    if "models" not in config:
+        raise ValueError("Configuration must include 'models' section")
+    models_raw = config["models"]
+    if not isinstance(models_raw, dict) or len(models_raw) == 0:
+        raise ValueError(
+            "'models' must be a non-empty table mapping names to .pt file paths"
+        )
+
+    models: Dict[str, Path] = {}
+    for name, path_str in models_raw.items():
+        if not isinstance(path_str, str):
+            raise ValueError(f"Model '{name}' path must be a string")
+        p = Path(path_str)
+        if not p.exists() or not p.is_file():
+            raise ValueError(f"Model file for '{name}' does not exist: {p}")
+        models[name] = p
+
+    # Optional: systems
+    systems = config.get("systems", None)
+    if systems is not None and not isinstance(systems, list):
+        raise ValueError("'systems' must be a list of strings")
+
+    # Optional: dates
+    start_date: Optional[dt.date] = None
+    end_date: Optional[dt.date] = None
+
+    if "start_date" in config and config["start_date"]:
+        try:
+            start_date = dt.datetime.strptime(
+                config["start_date"], "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            raise ValueError(
+                f"Invalid start_date format '{config['start_date']}'. Expected YYYY-MM-DD."
+            )
+
+    if "end_date" in config and config["end_date"]:
+        try:
+            end_date = dt.datetime.strptime(config["end_date"], "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(
+                f"Invalid end_date format '{config['end_date']}'. Expected YYYY-MM-DD."
+            )
+
+    return _ClassifyImagesConfig(
+        root=root,
+        models=models,
+        systems=systems,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+def classify_images() -> None:
+    """
+    CLI tool to run multiple classifier models on nightskycam images
+    and write prediction scores into TOML metadata files.
+    """
+    app = typer.Typer(
+        help="Classify nightskycam images and write scores to TOML metadata."
+    )
+
+    @app.command()
+    def run(
+        config_path: Optional[Path] = typer.Argument(
+            None,
+            help="Path to the TOML configuration file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+        create_config: bool = typer.Option(
+            False,
+            "--create-config",
+            help="Create a default configuration file named 'nightskycam_classify_images_config.toml' in the current directory.",
+        ),
+        debug: bool = typer.Option(
+            False,
+            "--debug",
+            help="Enable debug logging.",
+        ),
+    ) -> None:
+        """Run classifiers on images and write scores to metadata TOML files."""
+        # Configure logging
+        logger.remove()
+        if debug:
+            logger.add(sys.stderr, level="DEBUG")
+        else:
+            logger.add(sys.stderr, level="INFO")
+
+        # Handle --create-config
+        if create_config:
+            default_config = _get_default_classify_images_config()
+            config_file_path = Path("nightskycam_classify_images_config.toml")
+            if config_file_path.exists():
+                logger.error(
+                    f"Configuration file already exists: {config_file_path}"
+                )
+                logger.info(
+                    "Remove the existing file or specify a different name."
+                )
+                sys.exit(1)
+            _save_config(default_config, config_file_path)
+            logger.info(f"Created default configuration file: {config_file_path}")
+            logger.info(
+                "Please edit the file with your actual paths and settings, then run again."
+            )
+            sys.exit(0)
+
+        # Require config_path
+        if config_path is None:
+            logger.error("No configuration file provided.")
+            logger.info(
+                "Use --create-config to generate a template, or provide a config file path."
+            )
+            sys.exit(1)
+
+        try:
+            # Load and parse config
+            logger.info(f"Loading configuration from: {config_path}")
+            config = _load_config(config_path)
+            parsed = _parse_classify_images_config(config)
+
+            root = parsed.root
+            model_map = parsed.models
+            systems = parsed.systems
+            start_date = parsed.start_date
+            end_date = parsed.end_date
+
+            logger.info(f"Root directory: {root}")
+            logger.info(f"Models: {', '.join(model_map.keys())}")
+            if systems:
+                logger.info(f"Systems filter: {systems}")
+            if start_date or end_date:
+                logger.info(
+                    f"Date range: {start_date or 'any'} to {end_date or 'any'}"
+                )
+
+            # Load all models
+            logger.info(f"Loading {len(model_map)} model(s)...")
+            scorers: Dict[str, SkyScorer] = {}
+            for name, model_path in model_map.items():
+                logger.info(f"  Loading model '{name}': {model_path}")
+                try:
+                    scorers[name] = SkyScorer(str(model_path), validate_size=False)
+                except Exception as e:
+                    logger.error(f"Failed to load model '{name}': {e}")
+                    sys.exit(1)
+            logger.info("All models loaded successfully")
+
+            # Statistics
+            stats = {
+                "total_scanned": 0,
+                "total_with_thumbnails": 0,
+                "total_classified": 0,
+                "total_written": 0,
+                "errors": 0,
+            }
+
+            logger.info("Starting image classification...")
+
+            # Iterate through systems
+            for system_path in walk_systems(root):
+                system_name = system_path.name
+
+                if systems is not None and system_name not in systems:
+                    logger.debug(
+                        f"Skipping system (not in filter): {system_name}"
+                    )
+                    continue
+
+                logger.info(f"Processing system: {system_name}")
+
+                for date_, date_path in walk_dates(system_path):
+                    if not _is_within_date_range(date_, start_date, end_date):
+                        logger.debug(f"Skipping date (out of range): {date_}")
+                        continue
+
+                    date_str = date_.strftime("%Y_%m_%d")
+                    logger.info(f"  Processing date: {date_str}")
+
+                    try:
+                        images = get_images(date_path)
+                    except PermissionError as e:
+                        logger.error(f"    Permission denied: {e}")
+                        stats["errors"] += 1
+                        continue
+                    except Exception as e:
+                        logger.error(f"    Error reading date directory: {e}")
+                        stats["errors"] += 1
+                        if debug:
+                            raise
+                        continue
+
+                    if not images:
+                        logger.debug("    No images with thumbnails found")
+                        continue
+
+                    date_classified = 0
+
+                    for image in images:
+                        stats["total_scanned"] += 1
+
+                        # Skip images without thumbnails
+                        thumbnail_path = image.thumbnail
+                        if thumbnail_path is None or not thumbnail_path.exists():
+                            logger.debug(
+                                f"    Skipping (no thumbnail): {image.filename_stem}"
+                            )
+                            continue
+
+                        stats["total_with_thumbnails"] += 1
+
+                        # Skip images without TOML metadata files
+                        meta_path = image.meta_path
+                        if meta_path is None:
+                            logger.debug(
+                                f"    Skipping (no TOML): {image.filename_stem}"
+                            )
+                            continue
+
+                        try:
+                            # Load thumbnail
+                            thumbnail_array = to_npy(thumbnail_path)
+                            rgb_float = to_float_image(thumbnail_array)
+
+                            # Run all classifiers
+                            classifier_scores: Dict[str, float] = {}
+                            for name, scorer in scorers.items():
+                                result_raw = scorer.predict(rgb_float)
+                                result = (
+                                    result_raw[0]
+                                    if isinstance(result_raw, list)
+                                    else result_raw
+                                )
+                                classifier_scores[name] = float(result.probability)
+                                logger.debug(
+                                    f"      {name}: probability={result.probability:.3f}"
+                                )
+
+                            stats["total_classified"] += 1
+
+                            # Read existing TOML, update classifiers section, write back
+                            with open(meta_path, "rb") as f:
+                                meta_data = tomli.load(f)
+
+                            meta_data["classifiers"] = classifier_scores
+
+                            with open(meta_path, "wb") as f:
+                                tomli_w.dump(meta_data, f)
+
+                            stats["total_written"] += 1
+                            date_classified += 1
+
+                        except Exception as e:
+                            logger.error(
+                                f"    Error processing {image.filename_stem}: {e}"
+                            )
+                            stats["errors"] += 1
+                            if debug:
+                                raise
+
+                    if date_classified > 0:
+                        logger.info(
+                            f"    Classified: {date_classified} images"
+                        )
+
+            # Summary
+            logger.info("")
+            logger.info("=== Classification Summary ===")
+            logger.info(f"Total images scanned: {stats['total_scanned']}")
+            logger.info(
+                f"Images with thumbnails: {stats['total_with_thumbnails']}"
+            )
+            logger.info(f"Images classified: {stats['total_classified']}")
+            logger.info(f"TOML files updated: {stats['total_written']}")
+            if stats["errors"] > 0:
+                logger.warning(f"Errors encountered: {stats['errors']}")
+            logger.info("Done!")
+            sys.exit(0)
+
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            if debug:
+                raise
+            sys.exit(1)
+
+    app()

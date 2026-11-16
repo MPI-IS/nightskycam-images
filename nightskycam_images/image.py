@@ -128,6 +128,12 @@ class Image:
         return meta
 
     @property
+    def classifiers(self) -> Dict[str, float]:
+        """Classifier scores from the [classifiers] section of the metadata TOML."""
+        meta = self.meta
+        return meta.get("classifiers", {})
+
+    @property
     def nightstart_date(self) -> Optional[dt.date]:
         """
         Start date of the night.
