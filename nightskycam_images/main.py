@@ -5,9 +5,11 @@ import filecmp
 import logging
 from pathlib import Path
 import shutil
+import subprocess
 import sys
+import tempfile
 import traceback
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import imageio.v3 as iio
 from loguru import logger
@@ -1327,7 +1329,7 @@ def _same_file(a: Path, b: Path) -> bool:
 def _move_selected_from_list(
     list_file: Path,
     roots: List[Path],
-    destination: Path,
+    destination: Union[Path, str],
     dry_run: bool = False,
 ) -> Dict[str, int]:
     """
@@ -1335,6 +1337,11 @@ def _move_selected_from_list(
     blank lines and ``#`` comments ignored) — with their ``.toml`` and
     thumbnail — from whichever root contains each into ``destination``,
     keeping the ``system/date[/thumbnails]`` structure.
+
+    A ``Path`` destination is a local folder (files are moved). A ``str``
+    destination is an rsync target (e.g. ``user@host:/path``): files are
+    copied with rsync, checksum-verified, and only then deleted locally.
+    Both modes apply the same per-image rules below.
 
     Each listed image ends up ONLY in ``destination``:
       - no target yet            -> the image is moved there;
@@ -1366,8 +1373,8 @@ def _move_selected_from_list(
             stems.append(name)
     stats["stems"] = len(stems)
 
-    # Pass 1 — resolve each image's move operations without writing anything.
-    per_image_ops: List[Tuple[str, List[Tuple[Path, Path]]]] = []
+    # Pass 1 — resolve each image's files without writing anything.
+    resolved: List[Tuple[str, Path, List[Path]]] = []
     for stem in stems:
         try:
             source_root, files = _resolve_stem_files(stem, roots)
@@ -1379,25 +1386,45 @@ def _move_selected_from_list(
             stats["not_found"] += 1
             logger.info(f"not found in any root: {stem}")
             continue
-        ops = [
-            (source, destination / source.relative_to(source_root))
-            for source in files
-        ]
-        per_image_ops.append((stem, ops))
+        resolved.append((stem, source_root, files))
 
-    # Pass 2 — realise each image so it ends up only in the destination.
-    for stem, ops in per_image_ops:
+    if isinstance(destination, str):
+        _realise_with_rsync(resolved, destination, stats, dry_run=dry_run)
+    else:
+        _realise_locally(resolved, destination, stats, dry_run=dry_run)
+
+    if not dry_run:
+        for root in roots:
+            _cleanup_empty_directories(root, dry_run=False)
+    return stats
+
+
+def _count_moved(source: Path, stats: Dict[str, int]) -> None:
+    if source.parent.name == THUMBNAIL_DIR_NAME:
+        stats["moved_thumbs"] += 1
+    elif source.suffix.lower() == ".toml":
+        stats["moved_toml"] += 1
+    else:
+        stats["moved_images"] += 1
+
+
+def _realise_locally(
+    resolved: List[Tuple[str, Path, List[Path]]],
+    destination: Path,
+    stats: Dict[str, int],
+    dry_run: bool = False,
+) -> None:
+    """Pass 2 of ``_move_selected_from_list`` for a local destination."""
+    for stem, source_root, files in resolved:
+        ops = [
+            (source, destination / source.relative_to(source_root)) for source in files
+        ]
         existing = [(src, dest) for src, dest in ops if dest.exists()]
         if not existing:
             # Clean move.
             for source, dest in ops:
                 _move_file_safe(source, dest, dry_run=dry_run)
-                if source.parent.name == THUMBNAIL_DIR_NAME:
-                    stats["moved_thumbs"] += 1
-                elif source.suffix.lower() == ".toml":
-                    stats["moved_toml"] += 1
-                else:
-                    stats["moved_images"] += 1
+                _count_moved(source, stats)
         elif len(existing) == len(ops) and all(
             _same_file(src, dest) for src, dest in ops
         ):
@@ -1415,10 +1442,130 @@ def _move_selected_from_list(
                 f"destination differs, leaving {stem} in place: {existing[0][1]}"
             )
 
-    if not dry_run:
-        for root in roots:
-            _cleanup_empty_directories(root, dry_run=False)
-    return stats
+
+def is_rsync_target(destination: str) -> bool:
+    """True if ``destination`` names a remote rsync/scp-style target
+    (``[user@]host:path``): a colon appears before any slash, which is
+    rsync's own rule for telling a remote spec from a local path."""
+    colon = destination.find(":")
+    if colon <= 0:
+        return False
+    slash = destination.find("/")
+    return slash == -1 or colon < slash
+
+
+def _run_rsync(
+    source_root: Path, rel_paths: List[Path], target: str, extra: List[str]
+) -> str:
+    """Run rsync for ``rel_paths`` (relative to ``source_root``, recreated
+    under ``target`` via ``--files-from``) and return its stdout."""
+    target = target if target.endswith("/") else target + "/"
+    with tempfile.NamedTemporaryFile("wb", suffix=".lst") as files_from:
+        files_from.write(b"".join(str(p).encode() + b"\0" for p in rel_paths))
+        files_from.flush()
+        cmd = [
+            "rsync",
+            "-a",
+            "--from0",
+            f"--files-from={files_from.name}",
+            *extra,
+            f"{source_root}/",
+            target,
+        ]
+        logger.debug(f"running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"rsync failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return result.stdout
+
+
+def _rsync_differences(
+    source_root: Path, rel_paths: List[Path], target: str
+) -> Dict[Path, str]:
+    """Compare ``rel_paths`` with ``target`` by checksum, writing nothing.
+
+    Returns ``{rel_path: "missing" | "differs"}`` for files rsync would
+    transfer; a path absent from the result has identical content remotely.
+    """
+    out = _run_rsync(
+        source_root,
+        rel_paths,
+        target,
+        ["--checksum", "--dry-run", "--out-format=%i %n"],
+    )
+    diffs: Dict[Path, str] = {}
+    for line in out.splitlines():
+        # %i is an 11-char code; ">f..." means a regular file would be sent,
+        # ">f+++++++++" that it does not exist on the receiver yet.
+        code, _, name = line.partition(" ")
+        if len(code) == 11 and code.startswith(">f"):
+            diffs[Path(name)] = "missing" if code == ">f+++++++++" else "differs"
+    return diffs
+
+
+def _realise_with_rsync(
+    resolved: List[Tuple[str, Path, List[Path]]],
+    target: str,
+    stats: Dict[str, int],
+    dry_run: bool = False,
+) -> None:
+    """Pass 2 of ``_move_selected_from_list`` for an rsync target.
+
+    Per source root: one checksum dry-run classifies every image (all files
+    missing remotely -> clean move; all identical -> already archived;
+    otherwise -> conflict, left untouched). Clean images are copied with
+    ``--ignore-existing`` (never overwrites), re-verified by checksum, and
+    their local files deleted only once every file is confirmed identical.
+    """
+    by_root: Dict[Path, List[Tuple[str, List[Path]]]] = {}
+    for stem, source_root, files in resolved:
+        rels = [f.relative_to(source_root) for f in files]
+        by_root.setdefault(source_root, []).append((stem, rels))
+
+    for source_root, images in by_root.items():
+        all_rels = [rel for _, rels in images for rel in rels]
+        diffs = _rsync_differences(source_root, all_rels, target)
+
+        to_copy: List[Tuple[str, List[Path]]] = []
+        for stem, rels in images:
+            states = [diffs.get(rel) for rel in rels]
+            if all(state == "missing" for state in states):
+                to_copy.append((stem, rels))
+            elif all(state is None for state in states):
+                for rel in rels:
+                    _delete_path_safe(source_root / rel, dry_run=dry_run)
+                stats["already_archived"] += 1
+                logger.info(f"already archived (identical), removed source: {stem}")
+            else:
+                stats["conflicts"] += 1
+                logger.warning(
+                    f"destination differs, leaving {stem} in place: "
+                    f"{target.rstrip('/')}/{rels[0]}"
+                )
+
+        if not to_copy:
+            continue
+        copy_rels = [rel for _, rels in to_copy for rel in rels]
+        if dry_run:
+            for rel in copy_rels:
+                logger.info(f"[DRY-RUN] Would copy: {source_root / rel} -> {target}")
+                _count_moved(source_root / rel, stats)
+            continue
+
+        _run_rsync(source_root, copy_rels, target, ["--ignore-existing", "--mkpath"])
+        unverified = _rsync_differences(source_root, copy_rels, target)
+        for stem, rels in to_copy:
+            if any(rel in unverified for rel in rels):
+                # Should not happen (e.g. the remote changed mid-run): keep
+                # the source so nothing is lost.
+                stats["conflicts"] += 1
+                logger.error(f"copy of {stem} could not be verified, kept locally")
+                continue
+            for rel in rels:
+                _delete_path_safe(source_root / rel)
+                _count_moved(source_root / rel, stats)
 
 
 def move_list() -> None:
@@ -1431,8 +1578,10 @@ def move_list() -> None:
         help=(
             "Move the images listed in a file (one filename_stem per line) "
             "plus their .toml and thumbnail into a destination, keeping the "
-            "system/date structure. The database is not touched — run "
-            "ns.db.update afterwards to refresh it."
+            "system/date structure. The destination may be a local folder or "
+            "a remote rsync target (user@host:/path, needs rsync >= 3.2.3 on "
+            "both ends). The database is not touched — run ns.db.prune "
+            "afterwards to drop the moved images from it."
         )
     )
 
@@ -1454,10 +1603,13 @@ def move_list() -> None:
             dir_okay=True,
             resolve_path=True,
         ),
-        destination: Path = typer.Argument(
+        destination: str = typer.Argument(
             ...,
-            help="Destination folder (created if missing).",
-            resolve_path=True,
+            help=(
+                "Destination folder (created if missing), or a remote rsync "
+                "target such as user@host:/path (files are copied with rsync, "
+                "checksum-verified, then deleted locally)."
+            ),
         ),
         second_root: Optional[Path] = typer.Option(
             None,
@@ -1485,20 +1637,27 @@ def move_list() -> None:
                 raise typer.Exit(code=1)
             roots.append(second_root)
 
-        for a_root in roots:
-            if destination.is_relative_to(a_root) or a_root.is_relative_to(
-                destination
-            ):
+        target: Union[Path, str]
+        if is_rsync_target(destination):
+            if shutil.which("rsync") is None:
                 typer.echo(
-                    f"Error: destination ({destination}) must be outside the "
-                    f"data root ({a_root}).",
+                    "Error: a remote destination requires rsync on PATH.",
                     err=True,
                 )
                 raise typer.Exit(code=1)
+            target = destination
+        else:
+            target = Path(destination).resolve()
+            for a_root in roots:
+                if target.is_relative_to(a_root) or a_root.is_relative_to(target):
+                    typer.echo(
+                        f"Error: destination ({target}) must be outside the "
+                        f"data root ({a_root}).",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
 
-        stats = _move_selected_from_list(
-            list_file, roots, destination, dry_run=dry_run
-        )
+        stats = _move_selected_from_list(list_file, roots, target, dry_run=dry_run)
 
         prefix = "[DRY-RUN] " if dry_run else ""
         typer.echo(
@@ -4638,9 +4797,7 @@ def db_filter() -> None:
                 for stem in stems:
                     f.write(f"{stem}\n")
         except OSError as error:
-            typer.echo(
-                f"Error: could not write {output_file}: {error}", err=True
-            )
+            typer.echo(f"Error: could not write {output_file}: {error}", err=True)
             raise typer.Exit(code=1)
         typer.echo(f"{len(stems)} image name(s) written to {output_file}")
 

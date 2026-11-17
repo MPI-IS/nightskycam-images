@@ -1,4 +1,9 @@
-"""Tests for ns.files.move-list (`_move_selected_from_list`)."""
+"""Tests for ns.files.move-list (`_move_selected_from_list`).
+
+Every scenario runs against a local destination and, when rsync is
+installed, against the same folder given as an rsync target (str), so the
+remote mode is held to identical semantics.
+"""
 
 from pathlib import Path
 import shutil
@@ -10,7 +15,7 @@ import pytest
 import tomli_w
 
 from nightskycam_images.constants import THUMBNAIL_DIR_NAME, THUMBNAIL_FILE_FORMAT
-from nightskycam_images.main import _move_selected_from_list
+from nightskycam_images.main import _move_selected_from_list, is_rsync_target
 
 
 def _make_image(root: Path, system: str, date: str, time: str) -> str:
@@ -31,8 +36,18 @@ def _write_list(path: Path, lines) -> Path:
     return path
 
 
-@pytest.fixture
-def tree():
+@pytest.fixture(
+    params=[
+        "local",
+        pytest.param(
+            "rsync",
+            marks=pytest.mark.skipif(
+                shutil.which("rsync") is None, reason="rsync not installed"
+            ),
+        ),
+    ]
+)
+def tree(request):
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         root = tmp / "root"
@@ -40,13 +55,14 @@ def tree():
         a = _make_image(root, "cam1", "2025_06_01", "20_00_00")
         b = _make_image(root, "cam1", "2025_06_01", "21_00_00")
         c = _make_image(root, "cam2", "2025_06_02", "22_00_00")
-        yield tmp, root, dest, (a, b, c)
+        target = dest if request.param == "local" else str(dest)
+        yield tmp, root, dest, target, (a, b, c)
 
 
 def test_move_keeps_structure(tree):
-    tmp, root, dest, (a, b, c) = tree
+    tmp, root, dest, target, (a, b, c) = tree
     lst = _write_list(tmp / "sel.txt", ["# selection", a, b])
-    stats = _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], target)
 
     assert stats["moved_images"] == 2
     assert stats["moved_toml"] == 2
@@ -63,38 +79,38 @@ def test_move_keeps_structure(tree):
 
 
 def test_dry_run_moves_nothing(tree):
-    tmp, root, dest, (a, b, c) = tree
+    tmp, root, dest, target, (a, b, c) = tree
     lst = _write_list(tmp / "sel.txt", [a])
-    stats = _move_selected_from_list(lst, [root], dest, dry_run=True)
+    stats = _move_selected_from_list(lst, [root], target, dry_run=True)
     assert stats["moved_images"] == 1  # counted, but not moved
     assert (root / "cam1" / "2025_06_01" / f"{a}.jpg").is_file()
     assert not dest.exists() or not any(dest.rglob("*.jpg"))
 
 
 def test_second_root(tree):
-    tmp, root, dest, _ = tree
+    tmp, root, dest, target, _ = tree
     root2 = tmp / "root2"
     d = _make_image(root2, "cam3", "2025_06_03", "23_00_00")
     lst = _write_list(tmp / "sel.txt", [d])
-    stats = _move_selected_from_list(lst, [root, root2], dest)
+    stats = _move_selected_from_list(lst, [root, root2], target)
     assert stats["moved_images"] == 1
     assert (dest / "cam3" / "2025_06_03" / f"{d}.jpg").is_file()
     assert not (root2 / "cam3" / "2025_06_03" / f"{d}.jpg").exists()
 
 
 def test_not_found_and_invalid(tree):
-    tmp, root, dest, (a, b, c) = tree
+    tmp, root, dest, target, (a, b, c) = tree
     lst = _write_list(
         tmp / "sel.txt", [a, "cam9_2099_01_01_00_00_00", "not a stem at all"]
     )
-    stats = _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], target)
     assert stats["moved_images"] == 1  # only `a` exists on disk
     assert stats["not_found"] == 1  # cam9 stem parses but is absent
     assert stats["invalid"] == 1  # unparseable line
 
 
 def test_after_midnight_stem_found_in_night_folder(tree):
-    tmp, root, dest, _ = tree
+    tmp, root, dest, target, _ = tree
     # An after-midnight capture is filed under the previous day's (observing-
     # night) folder, but its filename carries the next calendar date. move-list
     # must still find it (it derives the folder from the stem's calendar date).
@@ -110,7 +126,7 @@ def test_after_midnight_stem_found_in_night_folder(tree):
         tomli_w.dump({"process": "raw"}, f)
 
     lst = _write_list(tmp / "sel.txt", [stem])
-    stats = _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], target)
 
     assert stats["moved_images"] == 1
     assert stats["not_found"] == 0
@@ -122,7 +138,7 @@ def test_after_midnight_stem_found_in_night_folder(tree):
 
 
 def test_identical_target_removes_source(tree):
-    tmp, root, dest, (a, b, c) = tree
+    tmp, root, dest, target, (a, b, c) = tree
     # Pre-archive `a` identically at the destination (as an earlier run would).
     src_dir = root / "cam1" / "2025_06_01"
     dst_dir = dest / "cam1" / "2025_06_01"
@@ -135,7 +151,7 @@ def test_identical_target_removes_source(tree):
     )
     lst = _write_list(tmp / "sel.txt", [a, b])
 
-    stats = _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], target)
 
     assert stats["already_archived"] == 1  # `a` was a duplicate
     assert stats["moved_images"] == 1  # `b` moved normally
@@ -149,14 +165,14 @@ def test_identical_target_removes_source(tree):
 
 
 def test_differing_target_is_a_conflict(tree):
-    tmp, root, dest, (a, b, c) = tree
+    tmp, root, dest, target, (a, b, c) = tree
     # A target that exists but differs must NOT be overwritten or deleted.
-    target = dest / "cam1" / "2025_06_01" / f"{a}.jpg"
-    target.parent.mkdir(parents=True)
-    target.write_text("different content")
+    existing = dest / "cam1" / "2025_06_01" / f"{a}.jpg"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("different content")
     lst = _write_list(tmp / "sel.txt", [a, b])
 
-    stats = _move_selected_from_list(lst, [root], dest)
+    stats = _move_selected_from_list(lst, [root], target)
 
     assert stats["conflicts"] == 1
     assert stats["already_archived"] == 0
@@ -164,4 +180,20 @@ def test_differing_target_is_a_conflict(tree):
     # `a` left wholly in place; the differing target untouched.
     assert (root / "cam1" / "2025_06_01" / f"{a}.jpg").is_file()
     assert (root / "cam1" / "2025_06_01" / f"{a}.toml").is_file()
-    assert target.read_text() == "different content"
+    assert existing.read_text() == "different content"
+
+
+@pytest.mark.parametrize(
+    "destination, expected",
+    [
+        ("user@host:/data/removed", True),
+        ("host:/data/removed", True),
+        ("host:relative", True),
+        ("/data1/nightskycam/removed", False),
+        ("relative/dir", False),
+        ("./odd:name", False),
+        ("/abs/odd:name", False),
+    ],
+)
+def test_is_rsync_target(destination, expected):
+    assert is_rsync_target(destination) is expected
